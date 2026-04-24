@@ -55,6 +55,20 @@ async def upload_media(
 
 
 @router.get(
+    "/sessions/{session_id}/media/",
+    response_model=list[MediaOut],
+    response_model_by_alias=True,
+)
+async def list_media(
+    session_id: UUID,
+    user: AuthUser = Depends(get_current_user),
+    service: MediaService = Depends(get_media_service),
+) -> list[MediaOut]:
+    items = await service.list_media(session_id, user)
+    return [MediaOut.model_validate(m) for m in items]
+
+
+@router.get(
     "/media/{media_id}",
     response_model=MediaOut,
     response_model_by_alias=True,

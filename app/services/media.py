@@ -102,6 +102,14 @@ class MediaService:
         )
         return media
 
+    async def list_media(self, session_id: UUID, user: AuthUser) -> list[Media]:
+        session = await self.sessions_repo.get(session_id)
+        if session is None:
+            raise NotFoundError("Session not found.")
+        if session.profile_id != user.id:
+            raise ForbiddenError()
+        return await self.media_repo.list_for_session(session_id)
+
     async def get_media(self, media_id: UUID, user: AuthUser) -> Media:
         media = await self.media_repo.get(media_id)
         if media is None:
