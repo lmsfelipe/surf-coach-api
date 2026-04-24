@@ -1,0 +1,174 @@
+{
+  "info": {
+    "name": "Surf Coach — Phase 1",
+    "description": "End-to-end flow for Phase 1: Supabase signup/login, FastAPI /me, PATCH /me.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "a7b2c3d4-e5f6-7890-1234-567890abcdef"
+  },
+  "variable": [
+    {
+      "key": "SUPABASE_URL",
+      "value": "https://your-project-ref.supabase.co",
+      "description": "Your Supabase project URL"
+    },
+    {
+      "key": "SUPABASE_ANON_KEY",
+      "value": "",
+      "description": "Supabase anon key from Settings → API"
+    },
+    {
+      "key": "API_URL",
+      "value": "http://localhost:8000",
+      "description": "Local FastAPI base URL"
+    },
+    {
+      "key": "ACCESS_TOKEN",
+      "value": "",
+      "description": "Populated automatically by Signup/Login test scripts"
+    },
+    {
+      "key": "USER_EMAIL",
+      "value": "surfer@example.com"
+    },
+    {
+      "key": "USER_PASSWORD",
+      "value": "SuperSecret123!"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{API_URL}}/health",
+          "host": ["{{API_URL}}"],
+          "path": ["health"]
+        }
+      }
+    },
+    {
+      "name": "Supabase — Signup",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.access_token) {",
+              "  pm.collectionVariables.set('ACCESS_TOKEN', json.access_token);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "apikey", "value": "{{SUPABASE_ANON_KEY}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{SUPABASE_URL}}/auth/v1/signup",
+          "host": ["{{SUPABASE_URL}}"],
+          "path": ["auth", "v1", "signup"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{USER_EMAIL}}\",\n  \"password\": \"{{USER_PASSWORD}}\"\n}"
+        }
+      }
+    },
+    {
+      "name": "Supabase — Login",
+      "event": [
+        {
+          "listen": "test",
+          "script": {
+            "type": "text/javascript",
+            "exec": [
+              "const json = pm.response.json();",
+              "if (json.access_token) {",
+              "  pm.collectionVariables.set('ACCESS_TOKEN', json.access_token);",
+              "}"
+            ]
+          }
+        }
+      ],
+      "request": {
+        "method": "POST",
+        "header": [
+          { "key": "apikey", "value": "{{SUPABASE_ANON_KEY}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{SUPABASE_URL}}/auth/v1/token?grant_type=password",
+          "host": ["{{SUPABASE_URL}}"],
+          "path": ["auth", "v1", "token"],
+          "query": [{ "key": "grant_type", "value": "password" }]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"email\": \"{{USER_EMAIL}}\",\n  \"password\": \"{{USER_PASSWORD}}\"\n}"
+        }
+      }
+    },
+    {
+      "name": "GET /me",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+        "url": {
+          "raw": "{{API_URL}}/me",
+          "host": ["{{API_URL}}"],
+          "path": ["me"]
+        }
+      }
+    },
+    {
+      "name": "PATCH /me",
+      "request": {
+        "method": "PATCH",
+        "header": [
+          { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+          { "key": "Content-Type", "value": "application/json" }
+        ],
+        "url": {
+          "raw": "{{API_URL}}/me",
+          "host": ["{{API_URL}}"],
+          "path": ["me"]
+        },
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"surfLevel\": \"intermediate\",\n  \"heightCm\": 180,\n  \"weightKg\": 75\n}"
+        }
+      }
+    },
+    {
+      "name": "GET /me — no token (expect 401 MISSING_TOKEN)",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{API_URL}}/me",
+          "host": ["{{API_URL}}"],
+          "path": ["me"]
+        }
+      }
+    },
+    {
+      "name": "GET /me — tampered token (expect 401 INVALID_TOKEN)",
+      "request": {
+        "method": "GET",
+        "header": [{ "key": "Authorization", "value": "Bearer not-a-real-token" }],
+        "url": {
+          "raw": "{{API_URL}}/me",
+          "host": ["{{API_URL}}"],
+          "path": ["me"]
+        }
+      }
+    }
+  ]
+}
