@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     MAX_UPLOAD_SIZE_MB: int = Field(default=100, description="Upload size cap (MB)")
     MAX_VIDEO_DURATION_SEC: int = Field(default=120, description="Video duration cap (s)")
     SUPABASE_BUCKET: str = Field(default="surf-media", description="Supabase Storage bucket")
+    TRAINING_WORKOUTS_PER_PLAN: int = Field(default=3, description="Number of workouts Gemini generates per plan")
 
     @property
     def is_development(self) -> bool:

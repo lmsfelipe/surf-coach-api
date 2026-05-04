@@ -13,12 +13,15 @@ from app.core.errors import (
     NoMediaForSessionError,
     NotFoundError,
     ReviewAlreadyExistsError,
+    ReviewNotFoundError,
+    TrainingPlanAlreadyExistsError,
 )
 from app.core.frame_extractor import FrameExtractor
 from app.core.security.jwt import AuthUser
 from app.core.storage import StorageClient
 from app.models.review import Review
-from app.repositories.ai import ReviewRepository
+from app.models.training_plan import TrainingPlan
+from app.repositories.ai import ReviewRepository, TrainingPlanRepository
 from app.repositories.auth import AuthRepository
 from app.repositories.media import MediaRepository
 from app.repositories.sessions import SessionsRepository
@@ -134,6 +137,65 @@ class GeminiService:
         except ValueError as e:
             logger.exception("Gemini response was not valid JSON")
             raise AIParseFailedError() from e
+
+    def generate_training_plan(self, context: "TrainingContext") -> "TrainingPlanOutput":
+        import google.generativeai as genai
+
+        genai.configure(api_key=self.api_key)
+        model = genai.GenerativeModel(self.model_name)
+
+        workout_count = get_settings().TRAINING_WORKOUTS_PER_PLAN
+        system_persona = (
+            "Você é um treinador especialista em preparação física para surf. "
+            f"Gere um plano de treino estruturado com exatamente {workout_count} treinos, "
+            "personalizado com base nos dados de performance e áreas de melhoria do surfista. "
+            "Responda sempre em português do Brasil."
+        )
+        context_block = json.dumps(context.model_dump(), ensure_ascii=False, indent=2)
+        output_schema = (
+            "Retorne SOMENTE JSON válido (sem markdown, sem preâmbulo) seguindo este schema:\n"
+            "{\n"
+            '  "workouts": [\n'
+            "    {\n"
+            '      "sequence_number": 1,\n'
+            '      "title": string,\n'
+            '      "focus_area": string,\n'
+            '      "exercises": [\n'
+            "        {\n"
+            '          "name": string,\n'
+            '          "description": string,\n'
+            '          "sets": inteiro >= 1,\n'
+            '          "reps": string,\n'
+            '          "video_url": string | null\n'
+            "        }\n"
+            "      ]\n"
+            "    }\n"
+            "  ]\n"
+            "}\n"
+            f"Exatamente {workout_count} treinos. Cada treino deve ter de 4 a 6 exercícios. "
+            "video_url deve ser null, a menos que uma URL pública conhecida seja adequada."
+        )
+        prompt = f"{system_persona}\n\nSurfer context:\n{context_block}\n\n{output_schema}"
+
+        try:
+            response = model.generate_content(prompt)
+            raw_text = getattr(response, "text", None) or ""
+        except Exception as e:
+            logger.exception("Gemini API call failed (training plan)")
+            raise AIGenerationFailedError() from e
+
+        cleaned = _strip_json_fences(raw_text)
+        try:
+            output = TrainingPlanOutput.model_validate_json(cleaned)
+        except (ValidationError, ValueError) as e:
+            logger.exception("Gemini training plan response failed parsing")
+            raise AIParseFailedError() from e
+
+        if len(output.workouts) != workout_count:
+            raise AIParseFailedError(
+                f"Expected {workout_count} workouts, got {len(output.workouts)}."
+            )
+        return output
 
 
 def _clamp_round(value: float, ndigits: int = 1) -> float:
@@ -276,3 +338,144 @@ class ReviewService:
         if idx < 0:
             return None
         return url[idx:].split("?", 1)[0]
+
+
+# ---------------------------------------------------------------------------
+# Training plan Pydantic I/O models
+# ---------------------------------------------------------------------------
+
+class TrainingContext(BaseModel):
+    surf_level: str
+    improvement_tips: list[str]
+    score_flow: float | None
+    score_balance: float | None
+    score_maneuvers: float | None
+    score_wave_selection: float | None
+    score_drop: float | None
+    score_arms: float | None
+    overall_score: float | None
+    height_cm: int | None
+    weight_kg: int | None
+
+
+class ExerciseOutput(BaseModel):
+    name: str
+    description: str
+    sets: int
+    reps: str
+    video_url: str | None = None
+
+
+class WorkoutOutput(BaseModel):
+    sequence_number: int
+    title: str
+    focus_area: str
+    exercises: list[ExerciseOutput]
+
+
+class TrainingPlanOutput(BaseModel):
+    workouts: list[WorkoutOutput]
+
+
+# ---------------------------------------------------------------------------
+# TrainingService
+# ---------------------------------------------------------------------------
+
+class TrainingService:
+    def __init__(
+        self,
+        review_repo: ReviewRepository,
+        auth_repo: AuthRepository,
+        training_plan_repo: TrainingPlanRepository,
+        gemini: GeminiService,
+    ) -> None:
+        self.review_repo = review_repo
+        self.auth_repo = auth_repo
+        self.training_plan_repo = training_plan_repo
+        self.gemini = gemini
+        self.settings = get_settings()
+
+    async def generate_training_plan(
+        self, review_id: UUID, user: AuthUser
+    ) -> TrainingPlan:
+        review = await self.review_repo.get(review_id)
+        if review is None:
+            raise ReviewNotFoundError()
+        if review.profile_id != user.id:
+            raise ForbiddenError()
+
+        existing = await self.training_plan_repo.get_by_review_id(review_id)
+        if existing is not None:
+            raise TrainingPlanAlreadyExistsError()
+
+        profile = await self.auth_repo.get_profile(user.id)
+
+        context = TrainingContext(
+            surf_level=profile.surf_level if profile else "beginner",
+            improvement_tips=list(review.improvement_tips or []),
+            score_flow=float(review.score_flow) if review.score_flow is not None else None,
+            score_balance=float(review.score_balance) if review.score_balance is not None else None,
+            score_maneuvers=float(review.score_maneuvers) if review.score_maneuvers is not None else None,
+            score_wave_selection=float(review.score_wave_selection) if review.score_wave_selection is not None else None,
+            score_drop=float(review.score_drop) if review.score_drop is not None else None,
+            score_arms=float(review.score_arms) if review.score_arms is not None else None,
+            overall_score=float(review.overall_score) if review.overall_score is not None else None,
+            height_cm=profile.height_cm if profile else None,
+            weight_kg=profile.weight_kg if profile else None,
+        )
+
+        plan_output = self.gemini.generate_training_plan(context)
+
+        workouts_data = [
+            {
+                "sequence_number": w.sequence_number,
+                "title": w.title,
+                "focus_area": w.focus_area,
+                "exercises": [
+                    {
+                        "name": ex.name,
+                        "description": ex.description,
+                        "sets": ex.sets,
+                        "reps": ex.reps,
+                        "video_url": ex.video_url,
+                    }
+                    for ex in w.exercises
+                ],
+            }
+            for w in plan_output.workouts
+        ]
+
+        return await self.training_plan_repo.create(
+            review_id=review_id,
+            profile_id=user.id,
+            ai_model_version=self.settings.GEMINI_MODEL,
+            workouts=workouts_data,
+        )
+
+    async def get_plan_by_id(self, plan_id: UUID, user: AuthUser) -> TrainingPlan:
+        plan = await self.training_plan_repo.get_by_id(plan_id)
+        if plan is None:
+            raise NotFoundError("Training plan not found.")
+        if plan.profile_id != user.id:
+            raise ForbiddenError()
+        return plan
+
+    async def get_plan_by_review_id(self, review_id: UUID, user: AuthUser) -> TrainingPlan:
+        review = await self.review_repo.get(review_id)
+        if review is None:
+            raise NotFoundError("Review not found.")
+        if review.profile_id != user.id:
+            raise ForbiddenError()
+        plan = await self.training_plan_repo.get_by_review_id(review_id)
+        if plan is None:
+            raise NotFoundError("No training plan exists for this review yet.")
+        return plan
+
+    async def get_workout_by_id(self, workout_id: UUID, user: AuthUser):
+        workout = await self.training_plan_repo.get_workout_by_id(workout_id)
+        if workout is None:
+            raise NotFoundError("Workout not found.")
+        plan = await self.training_plan_repo.get_by_id(workout.plan_id)
+        if plan is None or plan.profile_id != user.id:
+            raise ForbiddenError()
+        return workout

@@ -34,24 +34,27 @@ def get_media_service(
 
 @router.post(
     "/sessions/{session_id}/media/",
-    response_model=MediaOut,
+    response_model=list[MediaOut],
     response_model_by_alias=True,
     status_code=status.HTTP_201_CREATED,
 )
 async def upload_media(
     session_id: UUID,
-    file: UploadFile = File(...),
+    file: list[UploadFile] = File(...),
     user: AuthUser = Depends(get_current_user),
     service: MediaService = Depends(get_media_service),
-) -> MediaOut:
-    data = await file.read()
-    media = await service.upload(
-        session_id=session_id,
-        file_bytes=data,
-        file_name=file.filename or "upload",
-        user=user,
-    )
-    return MediaOut.model_validate(media)
+) -> list[MediaOut]:
+    results = []
+    for f in file:
+        data = await f.read()
+        media = await service.upload(
+            session_id=session_id,
+            file_bytes=data,
+            file_name=f.filename or "upload",
+            user=user,
+        )
+        results.append(MediaOut.model_validate(media))
+    return results
 
 
 @router.get(

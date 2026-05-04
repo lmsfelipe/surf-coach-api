@@ -95,6 +95,18 @@ class ReviewAlreadyExistsError(AppError):
     message = "A review already exists for this session."
 
 
+class TrainingPlanAlreadyExistsError(AppError):
+    code = "TRAINING_PLAN_ALREADY_EXISTS"
+    status_code = status.HTTP_409_CONFLICT
+    message = "A training plan already exists for this review."
+
+
+class ReviewNotFoundError(AppError):
+    code = "REVIEW_NOT_FOUND"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Review not found."
+
+
 class StorageUploadFailedError(AppError):
     code = "STORAGE_UPLOAD_FAILED"
     status_code = status.HTTP_502_BAD_GATEWAY

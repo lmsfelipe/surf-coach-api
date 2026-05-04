@@ -1,0 +1,610 @@
+{
+  "info": {
+    "name": "Surf Coach — Phase 3",
+    "description": "Full Phase 3 flow: sessions, media upload, AI review, AI training plan generation and retrieval. Run requests top-to-bottom; test scripts auto-populate SESSION_ID, MEDIA_ID, REVIEW_ID, PLAN_ID, and WORKOUT_ID.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "c3d4e5f6-a7b8-9012-3456-789012cdef01"
+  },
+  "variable": [
+    {
+      "key": "SUPABASE_URL",
+      "value": "https://your-project-ref.supabase.co",
+      "description": "Your Supabase project URL"
+    },
+    {
+      "key": "SUPABASE_ANON_KEY",
+      "value": "",
+      "description": "Supabase anon key from Dashboard → Settings → API"
+    },
+    {
+      "key": "API_URL",
+      "value": "http://localhost:8000",
+      "description": "Local FastAPI base URL"
+    },
+    {
+      "key": "ACCESS_TOKEN",
+      "value": "",
+      "description": "Populated automatically by Login request"
+    },
+    {
+      "key": "USER_EMAIL",
+      "value": "surfer@example.com"
+    },
+    {
+      "key": "USER_PASSWORD",
+      "value": "SuperSecret123!"
+    },
+    {
+      "key": "SESSION_ID",
+      "value": "",
+      "description": "Populated automatically by Create Session request"
+    },
+    {
+      "key": "MEDIA_ID",
+      "value": "",
+      "description": "Populated automatically by Upload Media request"
+    },
+    {
+      "key": "REVIEW_ID",
+      "value": "",
+      "description": "Populated automatically by Generate Review request"
+    },
+    {
+      "key": "PLAN_ID",
+      "value": "",
+      "description": "Populated automatically by Generate Training Plan request"
+    },
+    {
+      "key": "WORKOUT_ID",
+      "value": "",
+      "description": "Populated automatically by Generate Training Plan request (workouts[1].id)"
+    }
+  ],
+  "item": [
+    {
+      "name": "0 — Sanity",
+      "item": [
+        {
+          "name": "GET /health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('ok body', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{API_URL}}/health",
+              "host": ["{{API_URL}}"],
+              "path": ["health"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1 — Auth",
+      "item": [
+        {
+          "name": "Supabase — Signup",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('ACCESS_TOKEN', json.access_token);",
+                  "  pm.test('got token', () => pm.expect(json.access_token).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{SUPABASE_ANON_KEY}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{SUPABASE_URL}}/auth/v1/signup",
+              "host": ["{{SUPABASE_URL}}"],
+              "path": ["auth", "v1", "signup"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{USER_EMAIL}}\",\n  \"password\": \"{{USER_PASSWORD}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Supabase — Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('got token', () => pm.expect(json.access_token).to.be.a('string'));",
+                  "pm.collectionVariables.set('ACCESS_TOKEN', json.access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{SUPABASE_ANON_KEY}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{SUPABASE_URL}}/auth/v1/token?grant_type=password",
+              "host": ["{{SUPABASE_URL}}"],
+              "path": ["auth", "v1", "token"],
+              "query": [{ "key": "grant_type", "value": "password" }]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{USER_EMAIL}}\",\n  \"password\": \"{{USER_PASSWORD}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /me",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('has surfLevel', () => pm.expect(pm.response.json()).to.have.property('surfLevel'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/me",
+              "host": ["{{API_URL}}"],
+              "path": ["me"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 — Sessions",
+      "item": [
+        {
+          "name": "POST /api/v1/sessions/ — create",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('has id', () => pm.expect(json.id).to.be.a('string'));",
+                  "pm.collectionVariables.set('SESSION_ID', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionDate\": \"2026-04-24\",\n  \"location\": \"Praia de Santos\",\n  \"waveConditions\": \"overhead, clean, SW swell\",\n  \"boardType\": \"shortboard 6'2\\\"\",\n  \"notes\": \"Felt good on the bigger sets\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 — Media",
+      "item": [
+        {
+          "name": "POST /api/v1/sessions/:id/media/ — upload JPEG",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('array with one item', () => pm.expect(json).to.be.an('array').with.lengthOf(1));",
+                  "pm.test('mediaType image', () => pm.expect(json[0].mediaType).to.eql('image'));",
+                  "pm.test('storageUrl non-empty', () => pm.expect(json[0].storageUrl).to.be.a('string').and.not.empty);",
+                  "pm.collectionVariables.set('MEDIA_ID', json[0].id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/{{SESSION_ID}}/media/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", "{{SESSION_ID}}", "media", ""]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "Select a JPEG/PNG/MP4 file from disk"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 — Reviews",
+      "item": [
+        {
+          "name": "POST /api/v1/reviews/ — generate AI review",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('has narrative', () => pm.expect(json.narrative).to.be.a('string').and.not.empty);",
+                  "pm.test('exactly 3 improvement tips', () => pm.expect(json.improvementTips).to.have.lengthOf(3));",
+                  "pm.collectionVariables.set('REVIEW_ID', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/reviews/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "reviews", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionId\": \"{{SESSION_ID}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/reviews/:id — get by ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('correct id', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('REVIEW_ID')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/reviews/{{REVIEW_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "reviews", "{{REVIEW_ID}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5 — Training Plans (Phase 3)",
+      "item": [
+        {
+          "name": "POST /api/v1/training-plans/ — generate plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('reviewId matches', () => pm.expect(json.reviewId).to.eql(pm.collectionVariables.get('REVIEW_ID')));",
+                  "pm.test('generatedBy ai', () => pm.expect(json.generatedBy).to.eql('ai'));",
+                  "pm.test('exactly 3 workouts', () => pm.expect(json.workouts).to.have.lengthOf(3));",
+                  "pm.test('each workout has 4-6 exercises', () => {",
+                  "  json.workouts.forEach(w => {",
+                  "    pm.expect(w.exercises.length).to.be.within(4, 6);",
+                  "  });",
+                  "});",
+                  "pm.test('exercises have required fields', () => {",
+                  "  json.workouts[0].exercises.forEach(ex => {",
+                  "    pm.expect(ex).to.have.property('name');",
+                  "    pm.expect(ex).to.have.property('description');",
+                  "    pm.expect(ex.sets).to.be.a('number').and.above(0);",
+                  "    pm.expect(ex.reps).to.be.a('string');",
+                  "  });",
+                  "});",
+                  "pm.collectionVariables.set('PLAN_ID', json.id);",
+                  "pm.collectionVariables.set('WORKOUT_ID', json.workouts[1].id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/training-plans/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "training-plans", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reviewId\": \"{{REVIEW_ID}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/training-plans/:id — get by ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('correct id', () => pm.expect(json.id).to.eql(pm.collectionVariables.get('PLAN_ID')));",
+                  "pm.test('3 workouts with exercises', () => {",
+                  "  pm.expect(json.workouts).to.have.lengthOf(3);",
+                  "  json.workouts.forEach(w => pm.expect(w.exercises.length).to.be.within(4, 6));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/training-plans/{{PLAN_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "training-plans", "{{PLAN_ID}}"]
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/reviews/:id/training-plan — get via review",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('same plan id', () => pm.expect(json.id).to.eql(pm.collectionVariables.get('PLAN_ID')));",
+                  "pm.test('reviewId matches', () => pm.expect(json.reviewId).to.eql(pm.collectionVariables.get('REVIEW_ID')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/reviews/{{REVIEW_ID}}/training-plan",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "reviews", "{{REVIEW_ID}}", "training-plan"]
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/workouts/:id — get single workout",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('correct id', () => pm.expect(json.id).to.eql(pm.collectionVariables.get('WORKOUT_ID')));",
+                  "pm.test('has exercises', () => pm.expect(json.exercises.length).to.be.within(4, 6));",
+                  "pm.test('sequenceNumber is 2', () => pm.expect(json.sequenceNumber).to.eql(2));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/workouts/{{WORKOUT_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "workouts", "{{WORKOUT_ID}}"]
+            }
+          }
+        },
+        {
+          "name": "POST /api/v1/training-plans/ — duplicate (expect 409)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 409', () => pm.response.to.have.status(409));",
+                  "pm.test('TRAINING_PLAN_ALREADY_EXISTS code', () => pm.expect(pm.response.json().error.code).to.eql('TRAINING_PLAN_ALREADY_EXISTS'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/training-plans/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "training-plans", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reviewId\": \"{{REVIEW_ID}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /api/v1/training-plans/ — non-existent reviewId (expect 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('REVIEW_NOT_FOUND code', () => pm.expect(pm.response.json().error.code).to.eql('REVIEW_NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/training-plans/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "training-plans", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reviewId\": \"00000000-0000-0000-0000-000000000000\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/reviews/:id/training-plan — no plan yet (expect 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/reviews/00000000-0000-0000-0000-000000000000/training-plan",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "reviews", "00000000-0000-0000-0000-000000000000", "training-plan"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6 — Cleanup",
+      "item": [
+        {
+          "name": "DELETE /api/v1/sessions/:id — cascades media, review, plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/{{SESSION_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", "{{SESSION_ID}}"]
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/training-plans/:id — confirm 404 after cascade delete",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/training-plans/{{PLAN_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "training-plans", "{{PLAN_ID}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

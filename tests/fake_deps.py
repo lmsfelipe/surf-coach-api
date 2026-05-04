@@ -5,10 +5,13 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+from app.models.exercise import Exercise
 from app.models.media import Media
 from app.models.profile import Profile
 from app.models.review import Review
 from app.models.session import Session
+from app.models.training_plan import TrainingPlan
+from app.models.workout import Workout
 
 
 class FakeAuthRepo:
@@ -166,14 +169,77 @@ class FakeFrameExtractor:
         return self._duration
 
 
+class FakeTrainingPlanRepo:
+    def __init__(self) -> None:
+        self._plans: dict[UUID, TrainingPlan] = {}
+        self._workouts: dict[UUID, Workout] = {}
+
+    async def get_by_id(self, plan_id: UUID) -> TrainingPlan | None:
+        return self._plans.get(plan_id)
+
+    async def get_by_review_id(self, review_id: UUID) -> TrainingPlan | None:
+        for p in self._plans.values():
+            if p.review_id == review_id:
+                return p
+        return None
+
+    async def get_workout_by_id(self, workout_id: UUID) -> Workout | None:
+        return self._workouts.get(workout_id)
+
+    async def create(self, *, review_id, profile_id, ai_model_version, workouts) -> TrainingPlan:
+        now = datetime.now(tz=timezone.utc)
+        plan = TrainingPlan(
+            id=uuid4(),
+            review_id=review_id,
+            profile_id=profile_id,
+            generated_by="ai",
+            ai_model_version=ai_model_version,
+            created_at=now,
+        )
+        plan_workouts = []
+        for w_data in workouts:
+            workout = Workout(
+                id=uuid4(),
+                plan_id=plan.id,
+                sequence_number=w_data["sequence_number"],
+                title=w_data["title"],
+                focus_area=w_data["focus_area"],
+                created_at=now,
+            )
+            workout_exercises = []
+            for idx, ex_data in enumerate(w_data["exercises"], start=1):
+                exercise = Exercise(
+                    id=uuid4(),
+                    workout_id=workout.id,
+                    sequence_number=idx,
+                    name=ex_data["name"],
+                    description=ex_data["description"],
+                    sets=ex_data["sets"],
+                    reps=ex_data["reps"],
+                    video_url=ex_data.get("video_url"),
+                    created_at=now,
+                )
+                workout_exercises.append(exercise)
+            workout.exercises = workout_exercises
+            self._workouts[workout.id] = workout
+            plan_workouts.append(workout)
+        plan.workouts = plan_workouts
+        self._plans[plan.id] = plan
+        return plan
+
+
 class FakeGeminiService:
     def __init__(self, output) -> None:
         self._output = output
         self.calls: list[tuple[int, object]] = []
+        self._training_output = None
 
     def analyze_surf_media(self, images, context):
         self.calls.append((len(images), context))
         return self._output
+
+    def generate_training_plan(self, context):
+        return self._training_output
 
     @staticmethod
     def parse_response(raw: str):
@@ -216,3 +282,29 @@ def make_review_output(
 
 def decimal(n: float) -> Decimal:
     return Decimal(str(n))
+
+
+def make_training_plan_output(workout_count: int = 3, exercises_per_workout: int = 5):
+    from app.services.ai import ExerciseOutput, TrainingPlanOutput, WorkoutOutput
+
+    workouts = []
+    for i in range(1, workout_count + 1):
+        exercises = [
+            ExerciseOutput(
+                name=f"Exercise {j}",
+                description=f"Description for exercise {j} in workout {i}.",
+                sets=3,
+                reps="10",
+                video_url=None,
+            )
+            for j in range(1, exercises_per_workout + 1)
+        ]
+        workouts.append(
+            WorkoutOutput(
+                sequence_number=i,
+                title=f"Workout {i} Title",
+                focus_area=f"focus area {i}",
+                exercises=exercises,
+            )
+        )
+    return TrainingPlanOutput(workouts=workouts)
