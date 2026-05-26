@@ -79,18 +79,23 @@ Allow users to create and access accounts.
 ## 6.2 User Profile
 
 ### Description
-Basic surfer profile used to contextualize analysis.
+Surfer profile used to contextualize analysis and personalize the experience.
 
 ### Fields
 - Email
 - Password
 - Surf level (required)
+- Name (optional)
+- Gender: Male / Female (optional)
+- Birthday (optional)
+- Avatar — stored in Supabase Storage, URL persisted on profile (optional)
 - Height (optional)
 - Weight (optional)
 
 ### Requirements
 - User can update profile
 - Data persists across sessions
+- Avatar upload handled directly by the client via Supabase Storage SDK; backend stores the resulting URL
 
 ---
 
@@ -102,12 +107,33 @@ Users can create sessions to track surf activity.
 ### Fields
 - Date (required)
 - Location (required)
-- Wave conditions (required)
+- Wave size in feet (required) — numeric, e.g. `4.5`
+- Surfboard (optional) — selected from the user's board inventory
 - Notes (optional)
 
 ### Requirements
 - Each session must be uniquely identified
 - Sessions are linked to a user
+- If a surfboard is referenced, it must belong to the authenticated user
+- Deleting a surfboard sets the session reference to null (does not delete the session)
+
+---
+
+## 6.2.1 Surfboard Inventory
+
+### Description
+Users maintain a personal inventory of surfboards to associate with sessions.
+
+### Fields
+- Board type: shortboard / longboard / funboard / bodyboard / other (required)
+- Board size in feet (required)
+- Volume in litres (optional)
+- Label / nickname (optional)
+
+### Requirements
+- Users can add, edit, and delete boards
+- A user can own multiple boards
+- Board is linked to the user's profile
 
 ---
 
@@ -195,23 +221,40 @@ Provide lightweight actionable tips instead of full training plans.
 
 ## 8. Data Model (High-Level)
 
-### User
+### User / Profile
 - id
 - email
 - password_hash
 - surf_level
+- name
+- gender (male | female)
+- birthday
+- avatar_url
 - height
 - weight
 - created_at
+- updated_at
+
+### Surfboard
+- id
+- profile_id (FK → Profile)
+- board_type (shortboard | longboard | funboard | bodyboard | other)
+- board_size (feet)
+- volume (litres, optional)
+- label (optional)
+- created_at
+- updated_at
 
 ### Session
 - id
-- user_id
+- user_id (FK → Profile)
 - date
 - location
-- wave_conditions
+- wave_size (feet, numeric)
+- surfboard_id (FK → Surfboard, nullable, SET NULL on delete)
 - notes
 - created_at
+- updated_at
 
 ### Media
 - id

@@ -219,7 +219,7 @@
             },
             "body": {
               "mode": "raw",
-              "raw": "{\n  \"sessionDate\": \"2026-04-24\",\n  \"location\": \"Praia de Santos\",\n  \"waveConditions\": \"overhead, clean, SW swell\",\n  \"boardType\": \"shortboard 6'2\\\"\",\n  \"notes\": \"Felt good on the bigger sets\"\n}"
+              "raw": "{\n  \"sessionDate\": \"2026-04-24\",\n  \"location\": \"Praia de Santos\",\n  \"waveSize\": 5.0,\n  \"notes\": \"Felt good on the bigger sets\"\n}"
             }
           }
         }

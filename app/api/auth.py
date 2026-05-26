@@ -21,6 +21,10 @@ def _to_out(user: AuthUser, profile) -> ProfileOut:
         surf_level=profile.surf_level,
         height_cm=profile.height_cm,
         weight_kg=profile.weight_kg,
+        name=profile.name,
+        gender=profile.gender,
+        birthday=profile.birthday,
+        avatar_url=profile.avatar_url,
         created_at=profile.created_at,
         updated_at=profile.updated_at,
     )

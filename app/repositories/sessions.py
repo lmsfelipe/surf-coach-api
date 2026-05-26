@@ -1,3 +1,4 @@
+from datetime import date
 from uuid import UUID
 
 from sqlalchemy import select
@@ -14,18 +15,18 @@ class SessionsRepository:
         self,
         *,
         profile_id: UUID,
-        session_date,
+        session_date: date,
         location: str,
-        wave_conditions: str,
-        board_type: str | None,
+        wave_size: float,
+        surfboard_id: UUID | None,
         notes: str | None,
     ) -> Session:
         session = Session(
             profile_id=profile_id,
             session_date=session_date,
             location=location,
-            wave_conditions=wave_conditions,
-            board_type=board_type,
+            wave_size=wave_size,
+            surfboard_id=surfboard_id,
             notes=notes,
         )
         self.db.add(session)

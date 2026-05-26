@@ -1,0 +1,899 @@
+{
+  "info": {
+    "name": "Surf Coach — Phase 3 Patch 1",
+    "description": "Complete flow for Phase 3 Patch 1: profile enhancements, surfboard management, and session refactor (waveSize + surfboardId). Run requests top-to-bottom; test scripts auto-populate variables. Depends on Phase 3 (training plans) being functional.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_postman_id": "d4e5f6a7-b8c9-0123-4567-890123defg02"
+  },
+  "variable": [
+    {
+      "key": "SUPABASE_URL",
+      "value": "https://your-project-ref.supabase.co",
+      "description": "Your Supabase project URL"
+    },
+    {
+      "key": "SUPABASE_ANON_KEY",
+      "value": "",
+      "description": "Supabase anon key from Dashboard → Settings → API"
+    },
+    {
+      "key": "API_URL",
+      "value": "http://localhost:8000",
+      "description": "Local FastAPI base URL"
+    },
+    {
+      "key": "ACCESS_TOKEN",
+      "value": "",
+      "description": "Populated automatically by Login request"
+    },
+    {
+      "key": "USER_EMAIL",
+      "value": "surfer@example.com"
+    },
+    {
+      "key": "USER_PASSWORD",
+      "value": "SuperSecret123!"
+    },
+    {
+      "key": "SURFBOARD_ID",
+      "value": "",
+      "description": "Populated automatically by Create Surfboard request"
+    },
+    {
+      "key": "SESSION_ID",
+      "value": "",
+      "description": "Populated automatically by Create Session request"
+    },
+    {
+      "key": "MEDIA_ID",
+      "value": "",
+      "description": "Populated automatically by Upload Media request"
+    },
+    {
+      "key": "REVIEW_ID",
+      "value": "",
+      "description": "Populated automatically by Generate Review request"
+    },
+    {
+      "key": "PLAN_ID",
+      "value": "",
+      "description": "Populated automatically by Generate Training Plan request"
+    },
+    {
+      "key": "WORKOUT_ID",
+      "value": "",
+      "description": "Populated automatically by Generate Training Plan request (workouts[1].id)"
+    }
+  ],
+  "item": [
+    {
+      "name": "0 — Sanity",
+      "item": [
+        {
+          "name": "GET /health",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('ok body', () => pm.expect(pm.response.json().status).to.eql('ok'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [],
+            "url": {
+              "raw": "{{API_URL}}/health",
+              "host": ["{{API_URL}}"],
+              "path": ["health"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "1 — Auth",
+      "item": [
+        {
+          "name": "Supabase — Signup",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "if (json.access_token) {",
+                  "  pm.collectionVariables.set('ACCESS_TOKEN', json.access_token);",
+                  "  pm.test('got token', () => pm.expect(json.access_token).to.be.a('string'));",
+                  "}"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{SUPABASE_ANON_KEY}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{SUPABASE_URL}}/auth/v1/signup",
+              "host": ["{{SUPABASE_URL}}"],
+              "path": ["auth", "v1", "signup"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{USER_EMAIL}}\",\n  \"password\": \"{{USER_PASSWORD}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Supabase — Login",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "const json = pm.response.json();",
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('got token', () => pm.expect(json.access_token).to.be.a('string'));",
+                  "pm.collectionVariables.set('ACCESS_TOKEN', json.access_token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "apikey", "value": "{{SUPABASE_ANON_KEY}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{SUPABASE_URL}}/auth/v1/token?grant_type=password",
+              "host": ["{{SUPABASE_URL}}"],
+              "path": ["auth", "v1", "token"],
+              "query": [{ "key": "grant_type", "value": "password" }]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"email\": \"{{USER_EMAIL}}\",\n  \"password\": \"{{USER_PASSWORD}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /me — verify new profile fields present",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('has surfLevel', () => pm.expect(json).to.have.property('surfLevel'));",
+                  "pm.test('has name field', () => pm.expect(json).to.have.property('name'));",
+                  "pm.test('has gender field', () => pm.expect(json).to.have.property('gender'));",
+                  "pm.test('has birthday field', () => pm.expect(json).to.have.property('birthday'));",
+                  "pm.test('has avatarUrl field', () => pm.expect(json).to.have.property('avatarUrl'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/me",
+              "host": ["{{API_URL}}"],
+              "path": ["me"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2 — Profile Enhancements",
+      "item": [
+        {
+          "name": "PATCH /me — set name, gender, birthday",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('name updated', () => pm.expect(json.name).to.eql('Test Surfer'));",
+                  "pm.test('gender updated', () => pm.expect(json.gender).to.eql('male'));",
+                  "pm.test('birthday updated', () => pm.expect(json.birthday).to.eql('1995-06-15'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/me",
+              "host": ["{{API_URL}}"],
+              "path": ["me"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"name\": \"Test Surfer\",\n  \"gender\": \"male\",\n  \"birthday\": \"1995-06-15\"\n}"
+            }
+          }
+        },
+        {
+          "name": "PATCH /me — set avatarUrl",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('avatarUrl updated', () => pm.expect(pm.response.json().avatarUrl).to.be.a('string').and.not.empty);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/me",
+              "host": ["{{API_URL}}"],
+              "path": ["me"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"avatarUrl\": \"https://example.supabase.co/storage/v1/object/public/avatars/test/avatar.jpg\"\n}"
+            }
+          }
+        },
+        {
+          "name": "PATCH /me — invalid gender (expect 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('VALIDATION_ERROR code', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/me",
+              "host": ["{{API_URL}}"],
+              "path": ["me"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"gender\": \"other\"\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3 — Surfboards",
+      "item": [
+        {
+          "name": "POST /api/v1/surfboards/ — create shortboard",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('has id', () => pm.expect(json.id).to.be.a('string'));",
+                  "pm.test('boardType is shortboard', () => pm.expect(json.boardType).to.eql('shortboard'));",
+                  "pm.test('boardSize matches', () => pm.expect(json.boardSize).to.eql(6.2));",
+                  "pm.test('volume matches', () => pm.expect(json.volume).to.eql(28.5));",
+                  "pm.collectionVariables.set('SURFBOARD_ID', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/surfboards/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "surfboards", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"boardType\": \"shortboard\",\n  \"boardSize\": 6.2,\n  \"volume\": 28.5,\n  \"label\": \"My daily driver\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/surfboards/ — list",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('is array', () => pm.expect(json).to.be.an('array'));",
+                  "pm.test('contains created board', () => {",
+                  "  const ids = json.map(b => b.id);",
+                  "  pm.expect(ids).to.include(pm.collectionVariables.get('SURFBOARD_ID'));",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/surfboards/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "surfboards", ""]
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/surfboards/:id — get by ID",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('correct id', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('SURFBOARD_ID')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/surfboards/{{SURFBOARD_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "surfboards", "{{SURFBOARD_ID}}"]
+            }
+          }
+        },
+        {
+          "name": "PATCH /api/v1/surfboards/:id — update label",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('label updated', () => pm.expect(pm.response.json().label).to.eql('Updated label'));",
+                  "pm.test('boardType unchanged', () => pm.expect(pm.response.json().boardType).to.eql('shortboard'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/surfboards/{{SURFBOARD_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "surfboards", "{{SURFBOARD_ID}}"]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"label\": \"Updated label\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/surfboards/:id — not found (expect 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 404', () => pm.response.to.have.status(404));",
+                  "pm.test('SURFBOARD_NOT_FOUND code', () => pm.expect(pm.response.json().error.code).to.eql('SURFBOARD_NOT_FOUND'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/surfboards/00000000-0000-0000-0000-000000000000",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "surfboards", "00000000-0000-0000-0000-000000000000"]
+            }
+          }
+        },
+        {
+          "name": "POST /api/v1/surfboards/ — invalid boardType (expect 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('VALIDATION_ERROR code', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/surfboards/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "surfboards", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"boardType\": \"fish\",\n  \"boardSize\": 5.8\n}"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4 — Sessions (refactored)",
+      "item": [
+        {
+          "name": "POST /api/v1/sessions/ — with waveSize and surfboardId",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('has id', () => pm.expect(json.id).to.be.a('string'));",
+                  "pm.test('waveSize is numeric', () => pm.expect(json.waveSize).to.be.a('number'));",
+                  "pm.test('waveSize matches', () => pm.expect(json.waveSize).to.eql(4.5));",
+                  "pm.test('surfboardId matches', () => pm.expect(json.surfboardId).to.eql(pm.collectionVariables.get('SURFBOARD_ID')));",
+                  "pm.test('no waveConditions field', () => pm.expect(json).to.not.have.property('waveConditions'));",
+                  "pm.collectionVariables.set('SESSION_ID', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionDate\": \"2026-05-04\",\n  \"location\": \"Praia do Rosa\",\n  \"waveSize\": 4.5,\n  \"surfboardId\": \"{{SURFBOARD_ID}}\",\n  \"notes\": \"Offshore wind, fun session\"\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /api/v1/sessions/ — without surfboardId (optional)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('surfboardId is null', () => pm.expect(json.surfboardId).to.be.null);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionDate\": \"2026-05-04\",\n  \"location\": \"Praia de Itamambuca\",\n  \"waveSize\": 2.0\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /api/v1/sessions/ — waveConditions rejected (expect 400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 400', () => pm.response.to.have.status(400));",
+                  "pm.test('VALIDATION_ERROR code', () => pm.expect(pm.response.json().error.code).to.eql('VALIDATION_ERROR'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionDate\": \"2026-05-04\",\n  \"location\": \"Praia do Rosa\",\n  \"waveConditions\": \"overhead, clean\"\n}"
+            }
+          }
+        },
+        {
+          "name": "POST /api/v1/sessions/ — foreign surfboardId (expect 403 or 404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status is 403 or 404', () => {",
+                  "  pm.expect([403, 404]).to.include(pm.response.code);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionDate\": \"2026-05-04\",\n  \"location\": \"Praia do Rosa\",\n  \"waveSize\": 3.0,\n  \"surfboardId\": \"00000000-0000-0000-0000-000000000000\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/sessions/:id — verify waveSize in response",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "const json = pm.response.json();",
+                  "pm.test('correct id', () => pm.expect(json.id).to.eql(pm.collectionVariables.get('SESSION_ID')));",
+                  "pm.test('has waveSize', () => pm.expect(json.waveSize).to.be.a('number'));",
+                  "pm.test('has surfboardId', () => pm.expect(json).to.have.property('surfboardId'));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/{{SESSION_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", "{{SESSION_ID}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "5 — Media",
+      "item": [
+        {
+          "name": "POST /api/v1/sessions/:id/media/ — upload JPEG",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('array with one item', () => pm.expect(json).to.be.an('array').with.lengthOf(1));",
+                  "pm.test('mediaType image', () => pm.expect(json[0].mediaType).to.eql('image'));",
+                  "pm.test('storageUrl non-empty', () => pm.expect(json[0].storageUrl).to.be.a('string').and.not.empty);",
+                  "pm.collectionVariables.set('MEDIA_ID', json[0].id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/{{SESSION_ID}}/media/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", "{{SESSION_ID}}", "media", ""]
+            },
+            "body": {
+              "mode": "formdata",
+              "formdata": [
+                {
+                  "key": "file",
+                  "type": "file",
+                  "src": "",
+                  "description": "Select a JPEG/PNG/MP4 file from disk"
+                }
+              ]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "6 — Reviews",
+      "item": [
+        {
+          "name": "POST /api/v1/reviews/ — generate AI review",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('has narrative', () => pm.expect(json.narrative).to.be.a('string').and.not.empty);",
+                  "pm.test('exactly 3 improvement tips', () => pm.expect(json.improvementTips).to.have.lengthOf(3));",
+                  "pm.collectionVariables.set('REVIEW_ID', json.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/reviews/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "reviews", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"sessionId\": \"{{SESSION_ID}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/reviews/:id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('correct id', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('REVIEW_ID')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/reviews/{{REVIEW_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "reviews", "{{REVIEW_ID}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "7 — Training Plans",
+      "item": [
+        {
+          "name": "POST /api/v1/training-plans/ — generate plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 201', () => pm.response.to.have.status(201));",
+                  "const json = pm.response.json();",
+                  "pm.test('reviewId matches', () => pm.expect(json.reviewId).to.eql(pm.collectionVariables.get('REVIEW_ID')));",
+                  "pm.test('generatedBy ai', () => pm.expect(json.generatedBy).to.eql('ai'));",
+                  "pm.test('exactly 3 workouts', () => pm.expect(json.workouts).to.have.lengthOf(3));",
+                  "pm.test('each workout has 4-6 exercises', () => {",
+                  "  json.workouts.forEach(w => {",
+                  "    pm.expect(w.exercises.length).to.be.within(4, 6);",
+                  "  });",
+                  "});",
+                  "pm.collectionVariables.set('PLAN_ID', json.id);",
+                  "pm.collectionVariables.set('WORKOUT_ID', json.workouts[1].id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" },
+              { "key": "Content-Type", "value": "application/json" }
+            ],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/training-plans/",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "training-plans", ""]
+            },
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"reviewId\": \"{{REVIEW_ID}}\"\n}"
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/training-plans/:id",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('correct id', () => pm.expect(pm.response.json().id).to.eql(pm.collectionVariables.get('PLAN_ID')));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/training-plans/{{PLAN_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "training-plans", "{{PLAN_ID}}"]
+            }
+          }
+        }
+      ]
+    },
+    {
+      "name": "8 — Cleanup",
+      "item": [
+        {
+          "name": "DELETE /api/v1/surfboards/:id — surfboardId set NULL on sessions",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/surfboards/{{SURFBOARD_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "surfboards", "{{SURFBOARD_ID}}"]
+            }
+          }
+        },
+        {
+          "name": "GET /api/v1/sessions/:id — surfboardId now null after board delete",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 200', () => pm.response.to.have.status(200));",
+                  "pm.test('surfboardId is null', () => pm.expect(pm.response.json().surfboardId).to.be.null);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/{{SESSION_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", "{{SESSION_ID}}"]
+            }
+          }
+        },
+        {
+          "name": "DELETE /api/v1/sessions/:id — cascades media, review, plan",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('status 204', () => pm.response.to.have.status(204));"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "DELETE",
+            "header": [{ "key": "Authorization", "value": "Bearer {{ACCESS_TOKEN}}" }],
+            "url": {
+              "raw": "{{API_URL}}/api/v1/sessions/{{SESSION_ID}}",
+              "host": ["{{API_URL}}"],
+              "path": ["api", "v1", "sessions", "{{SESSION_ID}}"]
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

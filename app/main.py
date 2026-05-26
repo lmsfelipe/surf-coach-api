@@ -1,7 +1,7 @@
 from fastapi import FastAPI
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
-from app.api import ai, auth, health, media, reviews, sessions
+from app.api import ai, auth, health, media, reviews, sessions, surfboards
 from app.core.config import get_settings
 from app.core.errors import register_exception_handlers
 
@@ -33,6 +33,7 @@ def create_app() -> FastAPI:
     app.include_router(media.router)
     app.include_router(reviews.router)
     app.include_router(ai.router)
+    app.include_router(surfboards.router)
 
     return app
 

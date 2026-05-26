@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.deps import db_session, get_current_user
 from app.core.security.jwt import AuthUser
 from app.repositories.sessions import SessionsRepository
+from app.repositories.surfboards import SurfboardRepository
 from app.schemas.sessions import SessionCreate, SessionOut
 from app.services.sessions import SessionsService
 
@@ -13,7 +14,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 
 def get_sessions_service(db: AsyncSession = Depends(db_session)) -> SessionsService:
-    return SessionsService(SessionsRepository(db))
+    return SessionsService(SessionsRepository(db), SurfboardRepository(db))
 
 
 @router.post(

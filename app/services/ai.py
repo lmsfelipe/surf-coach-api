@@ -25,6 +25,7 @@ from app.repositories.ai import ReviewRepository, TrainingPlanRepository
 from app.repositories.auth import AuthRepository
 from app.repositories.media import MediaRepository
 from app.repositories.sessions import SessionsRepository
+from app.repositories.surfboards import SurfboardRepository
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,7 @@ class ReviewService:
         media_repo: MediaRepository,
         review_repo: ReviewRepository,
         auth_repo: AuthRepository,
+        surfboard_repo: SurfboardRepository,
         gemini: GeminiService,
         frame_extractor: FrameExtractor,
         storage: StorageClient,
@@ -231,6 +233,7 @@ class ReviewService:
         self.media_repo = media_repo
         self.review_repo = review_repo
         self.auth_repo = auth_repo
+        self.surfboard_repo = surfboard_repo
         self.gemini = gemini
         self.frame_extractor = frame_extractor
         self.storage = storage
@@ -272,11 +275,17 @@ class ReviewService:
         if not all_frames:
             raise NoMediaForSessionError("No decodable media found for this session.")
 
+        board_type: str | None = None
+        if session.surfboard_id is not None:
+            surfboard = await self.surfboard_repo.get_by_id(session.surfboard_id)
+            if surfboard is not None:
+                board_type = surfboard.board_type
+
         context = SurferContext(
             skill_level=skill_level,
             location=session.location,
-            wave_conditions=session.wave_conditions,
-            board_type=session.board_type,
+            wave_conditions=f"{session.wave_size} ft",
+            board_type=board_type,
             notes=session.notes,
         )
 

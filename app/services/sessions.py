@@ -1,23 +1,36 @@
 from uuid import UUID
 
-from app.core.errors import ForbiddenError, NotFoundError
+from app.core.errors import ForbiddenError, NotFoundError, SurfboardForbiddenError, SurfboardNotFoundError
 from app.core.security.jwt import AuthUser
 from app.models.session import Session
 from app.repositories.sessions import SessionsRepository
+from app.repositories.surfboards import SurfboardRepository
 from app.schemas.sessions import SessionCreate
 
 
 class SessionsService:
-    def __init__(self, repo: SessionsRepository) -> None:
+    def __init__(
+        self,
+        repo: SessionsRepository,
+        surfboard_repo: SurfboardRepository | None = None,
+    ) -> None:
         self.repo = repo
+        self.surfboard_repo = surfboard_repo
 
     async def create_session(self, payload: SessionCreate, user: AuthUser) -> Session:
+        if payload.surfboard_id is not None and self.surfboard_repo is not None:
+            board = await self.surfboard_repo.get_by_id(payload.surfboard_id)
+            if board is None:
+                raise SurfboardNotFoundError()
+            if board.profile_id != user.id:
+                raise SurfboardForbiddenError()
+
         return await self.repo.create(
             profile_id=user.id,
             session_date=payload.session_date,
             location=payload.location,
-            wave_conditions=payload.wave_conditions,
-            board_type=payload.board_type,
+            wave_size=payload.wave_size,
+            surfboard_id=payload.surfboard_id,
             notes=payload.notes,
         )
 

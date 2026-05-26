@@ -19,18 +19,38 @@ Para acessar a plataforma
 
 ### User Story 1.2 — Configuração de perfil (Surfista)
 Como surfista  
-Quero configurar meus dados físicos  
+Quero configurar meus dados pessoais e físicos  
 Para receber análises e recomendações mais precisas
 
 **Acceptance Criteria:**
 - Campos disponíveis:
-  - Cidade (obrigatório)
-  - Idade (obrigatório)
+  - Nome (opcional)
+  - Gênero: Masculino / Feminino (opcional)
+  - Data de nascimento (opcional)
+  - Avatar — foto de perfil armazenada no Supabase Storage (opcional)
   - Altura (opcional)
   - Peso (opcional)
   - Nível de surf (obrigatório)
 - Dados devem ser editáveis a qualquer momento
 - Dados devem ser utilizados nas análises e recomendações
+
+---
+
+### User Story 1.3 — Gestão de pranchas
+Como surfista  
+Quero cadastrar minhas pranchas  
+Para registrar qual prancha usei em cada sessão
+
+**Acceptance Criteria:**
+- Usuário pode adicionar múltiplas pranchas ao perfil
+- Campos obrigatórios:
+  - Tipo: shortboard / longboard / funboard / bodyboard / other
+  - Tamanho (em pés, ex: 6.2)
+- Campos opcionais:
+  - Volume (em litros)
+  - Apelido / label
+- Prancha pode ser editada ou removida
+- Ao remover uma prancha, sessões vinculadas não são deletadas (referência fica nula)
 
 ---
 
@@ -45,12 +65,12 @@ Para acompanhar minha evolução
 - Campos obrigatórios:
   - Data
   - Local
-  - Condições do mar
-  - Nível do surfista
+  - Tamanho das ondas em pés (ex: 4.5) — substitui "condições do mar"
 - Campos opcionais:
-  - Tipo de prancha
+  - Prancha (selecionada do inventário do usuário)
   - Observações
 - Sessão deve ser salva com ID único
+- Ao selecionar uma prancha, o sistema valida que ela pertence ao usuário autenticado
 
 ---
 
@@ -298,8 +318,11 @@ Para controlar minha privacidade
 ## 8. Regras Gerais
 
 - Usuário possui apenas um perfil
-- Altura e peso pertencem ao perfil, não à sessão
+- Dados físicos e pessoais (altura, peso, nome, gênero, data de nascimento, avatar) pertencem ao perfil
+- Pranchas pertencem ao perfil; um usuário pode ter múltiplas pranchas
 - Sessão é entidade central do sistema
+- Tamanho das ondas (`waveSize`) é numérico em pés e obrigatório na sessão
+- Prancha referenciada na sessão é opcional; se removida, referência fica nula (ON DELETE SET NULL)
 - Análises são vinculadas à sessão
 - Treinos derivam de análises
 - Recomendação de prancha pertence à sessão

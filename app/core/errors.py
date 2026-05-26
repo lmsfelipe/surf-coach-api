@@ -107,6 +107,18 @@ class ReviewNotFoundError(AppError):
     message = "Review not found."
 
 
+class SurfboardNotFoundError(AppError):
+    code = "SURFBOARD_NOT_FOUND"
+    status_code = status.HTTP_404_NOT_FOUND
+    message = "Surfboard not found."
+
+
+class SurfboardForbiddenError(AppError):
+    code = "SURFBOARD_FORBIDDEN"
+    status_code = status.HTTP_403_FORBIDDEN
+    message = "This surfboard does not belong to you."
+
+
 class StorageUploadFailedError(AppError):
     code = "STORAGE_UPLOAD_FAILED"
     status_code = status.HTTP_502_BAD_GATEWAY

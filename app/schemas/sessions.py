@@ -16,8 +16,8 @@ class _CamelModel(BaseModel):
 class SessionCreate(_CamelModel):
     session_date: date
     location: str = Field(..., min_length=1, max_length=200)
-    wave_conditions: str = Field(..., min_length=1, max_length=300)
-    board_type: str | None = Field(default=None, max_length=100)
+    wave_size: float = Field(..., gt=0, description="Wave face height in feet")
+    surfboard_id: UUID | None = None
     notes: str | None = Field(default=None, max_length=1000)
 
 
@@ -26,8 +26,8 @@ class SessionOut(_CamelModel):
     profile_id: UUID
     session_date: date
     location: str
-    wave_conditions: str
-    board_type: str | None = None
+    wave_size: float
+    surfboard_id: UUID | None = None
     notes: str | None = None
     created_at: datetime
     updated_at: datetime

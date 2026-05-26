@@ -11,6 +11,7 @@ from app.repositories.ai import ReviewRepository
 from app.repositories.auth import AuthRepository
 from app.repositories.media import MediaRepository
 from app.repositories.sessions import SessionsRepository
+from app.repositories.surfboards import SurfboardRepository
 from app.schemas.reviews import ReviewCreate, ReviewOut
 from app.services.ai import GeminiService, ReviewService
 
@@ -36,6 +37,7 @@ def get_review_service(
         media_repo=MediaRepository(db),
         review_repo=ReviewRepository(db),
         auth_repo=AuthRepository(db),
+        surfboard_repo=SurfboardRepository(db),
         gemini=gemini,
         frame_extractor=frame_extractor,
         storage=storage,

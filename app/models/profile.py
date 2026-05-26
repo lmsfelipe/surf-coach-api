@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from uuid import UUID
 
-from sqlalchemy import DateTime, Integer, String, func
+from sqlalchemy import Date, DateTime, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -16,6 +16,10 @@ class Profile(Base):
     surf_level: Mapped[str] = mapped_column(String, nullable=False, default="beginner")
     height_cm: Mapped[int | None] = mapped_column(Integer, nullable=True)
     weight_kg: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    gender: Mapped[str | None] = mapped_column(String, nullable=True)
+    birthday: Mapped[date | None] = mapped_column(Date, nullable=True)
+    avatar_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
