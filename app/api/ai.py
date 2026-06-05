@@ -7,7 +7,7 @@ from app.core.deps import db_session, get_current_user
 from app.core.security.jwt import AuthUser
 from app.repositories.ai import ReviewRepository, TrainingPlanRepository
 from app.repositories.auth import AuthRepository
-from app.schemas.training import GenerateTrainingPlanRequest, TrainingPlanResponse, WorkoutResponse
+from app.schemas.training import GenerateTrainingPlanRequest, TrainingPlanListResponse, TrainingPlanResponse, WorkoutResponse
 from app.services.ai import GeminiService, TrainingService
 
 router = APIRouter(prefix="/api/v1", tags=["training"])
@@ -22,6 +22,22 @@ def get_training_service(
         auth_repo=AuthRepository(db),
         training_plan_repo=TrainingPlanRepository(db),
         gemini=gemini,
+    )
+
+
+@router.get(
+    "/training-plans/",
+    response_model=TrainingPlanListResponse,
+    response_model_by_alias=True,
+)
+async def list_training_plans(
+    user: AuthUser = Depends(get_current_user),
+    service: TrainingService = Depends(get_training_service),
+) -> TrainingPlanListResponse:
+    plans = await service.list_plans(user)
+    return TrainingPlanListResponse(
+        items=[TrainingPlanResponse.model_validate(p) for p in plans],
+        total=len(plans),
     )
 
 

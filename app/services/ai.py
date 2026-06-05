@@ -284,7 +284,7 @@ class ReviewService:
         context = SurferContext(
             skill_level=skill_level,
             location=session.location,
-            wave_conditions=f"{session.wave_size} ft",
+            wave_conditions=f"{session.wave_size} m",
             board_type=board_type,
             notes=session.notes,
         )
@@ -460,6 +460,9 @@ class TrainingService:
             ai_model_version=self.settings.GEMINI_MODEL,
             workouts=workouts_data,
         )
+
+    async def list_plans(self, user: AuthUser) -> list[TrainingPlan]:
+        return await self.training_plan_repo.list_for_profile(user.id)
 
     async def get_plan_by_id(self, plan_id: UUID, user: AuthUser) -> TrainingPlan:
         plan = await self.training_plan_repo.get_by_id(plan_id)

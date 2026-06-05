@@ -46,3 +46,8 @@ class TrainingPlanResponse(_CamelModel):
     ai_model_version: str | None = None
     created_at: datetime
     workouts: list[WorkoutResponse]
+
+
+class TrainingPlanListResponse(_CamelModel):
+    items: list[TrainingPlanResponse]
+    total: int

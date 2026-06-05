@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api import ai, auth, health, media, reviews, sessions, surfboards
@@ -16,6 +17,15 @@ def create_app() -> FastAPI:
 
     allowed_hosts = ["*"] if settings.is_development else ["localhost", "127.0.0.1"]
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=allowed_hosts)
+
+    if settings.CORS_ORIGINS:
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=settings.CORS_ORIGINS,
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
 
     @app.middleware("http")
     async def _security_headers(request, call_next):

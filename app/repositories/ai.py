@@ -80,6 +80,14 @@ class TrainingPlanRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_for_profile(self, profile_id: UUID) -> list[TrainingPlan]:
+        result = await self.db.execute(
+            self._eager_query()
+            .where(TrainingPlan.profile_id == profile_id)
+            .order_by(TrainingPlan.created_at.desc())
+        )
+        return list(result.scalars().all())
+
     async def get_workout_by_id(self, workout_id: UUID) -> Workout | None:
         result = await self.db.execute(
             select(Workout)
