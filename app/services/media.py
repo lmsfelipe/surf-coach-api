@@ -6,10 +6,15 @@ import magic
 
 from app.core.config import get_settings
 from app.core.errors import (
+    ExplicitContentError,
     FileTooLargeError,
     ForbiddenError,
     InvalidMediaTypeError,
+    MediaNotSurfRelatedError,
     NotFoundError,
+    TooFewPhotosError,
+    TooManyPhotosError,
+    TooManyVideosError,
     VideoTooLongError,
 )
 from app.core.frame_extractor import FrameExtractor
@@ -25,6 +30,10 @@ logger = logging.getLogger(__name__)
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 VIDEO_MIME_TYPES = {"video/mp4", "video/quicktime", "video/x-m4v"}
 ACCEPTED_MIME_TYPES = sorted(IMAGE_MIME_TYPES | VIDEO_MIME_TYPES)
+
+MIN_PHOTOS = 3
+MAX_PHOTOS = 10
+MAX_VIDEOS = 3
 
 MIME_EXT = {
     "image/jpeg": "jpg",
@@ -43,12 +52,36 @@ class MediaService:
         sessions_repo: SessionsRepository,
         storage: StorageClient,
         frame_extractor: FrameExtractor,
+        gemini=None,
     ) -> None:
         self.media_repo = media_repo
         self.sessions_repo = sessions_repo
         self.storage = storage
         self.frame_extractor = frame_extractor
+        self.gemini = gemini
         self.settings = get_settings()
+
+    def validate_upload_counts(self, files_bytes: list[bytes]) -> None:
+        """Validate photo/video count limits for a batch upload."""
+        photo_count = sum(
+            1 for data in files_bytes if magic.from_buffer(data, mime=True) in IMAGE_MIME_TYPES
+        )
+        video_count = sum(
+            1 for data in files_bytes if magic.from_buffer(data, mime=True) in VIDEO_MIME_TYPES
+        )
+
+        if 0 < photo_count < MIN_PHOTOS:
+            raise TooFewPhotosError(
+                details={"min_photos": MIN_PHOTOS, "uploaded": photo_count},
+            )
+        if photo_count > MAX_PHOTOS:
+            raise TooManyPhotosError(
+                details={"max_photos": MAX_PHOTOS, "uploaded": photo_count},
+            )
+        if video_count > MAX_VIDEOS:
+            raise TooManyVideosError(
+                details={"max_videos": MAX_VIDEOS, "uploaded": video_count},
+            )
 
     async def upload(
         self,
@@ -86,6 +119,8 @@ class MediaService:
                 )
             duration_seconds = Decimal(f"{duration:.2f}")
 
+        self._moderate(file_bytes, media_type, detected_mime)
+
         media_id = uuid4()
         ext = MIME_EXT.get(detected_mime, "bin")
         storage_key = f"{user.id}/{session_id}/{media_id}.{ext}"
@@ -119,12 +154,41 @@ class MediaService:
             raise ForbiddenError()
         return media
 
+    async def get_media_for_profile(self, media_id: UUID, profile_id: UUID) -> Media:
+        """Get media verifying it belongs to the given profile (token-based auth)."""
+        media = await self.media_repo.get(media_id)
+        if media is None:
+            raise NotFoundError("Media not found.")
+        session = await self.sessions_repo.get(media.session_id)
+        if session is None or session.profile_id != profile_id:
+            raise ForbiddenError()
+        return media
+
     async def delete_media(self, media_id: UUID, user: AuthUser) -> None:
         media = await self.get_media(media_id, user)
         key = self._extract_storage_key(media.storage_url, user.id, media.session_id, media.id)
         if key:
             self.storage.delete(key)
         await self.media_repo.delete(media)
+
+    def _moderate(self, file_bytes: bytes, media_type: str, mime_type: str) -> None:
+        if not self.settings.CONTENT_MODERATION_ENABLED:
+            return
+        if self.gemini is None:
+            logger.warning("Content moderation enabled but GeminiService not provided; skipping.")
+            return
+
+        if media_type == "image":
+            images = [file_bytes]
+        else:
+            images = self.frame_extractor.extract(file_bytes, frame_count=3)
+
+        result = self.gemini.moderate_media_content(images, mime_type=mime_type)
+
+        if result.explicit_content:
+            raise ExplicitContentError(details={"reason": result.reason})
+        if not result.surf_related:
+            raise MediaNotSurfRelatedError(details={"reason": result.reason})
 
     @staticmethod
     def _extract_storage_key(url: str, user_id, session_id, media_id) -> str | None:

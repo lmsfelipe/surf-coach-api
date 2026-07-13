@@ -55,8 +55,8 @@ class FakeSessionsRepo:
             profile_id=kwargs["profile_id"],
             session_date=kwargs["session_date"],
             location=kwargs["location"],
-            wave_conditions=kwargs["wave_conditions"],
-            board_type=kwargs.get("board_type"),
+            wave_size=kwargs["wave_size"],
+            surfboard_id=kwargs.get("surfboard_id"),
             notes=kwargs.get("notes"),
             created_at=now,
             updated_at=now,
@@ -152,6 +152,35 @@ class FakeStorageClient:
     def download(self, key: str) -> bytes:
         return self.uploaded.get(key, b"")
 
+    async def download_range(
+        self, key: str, range_header: str | None = None,
+    ):
+        from app.core.storage import StorageDownloadResult
+
+        content = self.uploaded.get(key, b"")
+
+        if range_header and content:
+            range_spec = range_header.replace("bytes=", "")
+            parts = range_spec.split("-")
+            start = int(parts[0]) if parts[0] else 0
+            end = int(parts[1]) if parts[1] else len(content) - 1
+            end = min(end, len(content) - 1)
+            sliced = content[start : end + 1]
+            return StorageDownloadResult(
+                status_code=206,
+                content=sliced,
+                content_type="image/jpeg",
+                content_length=len(sliced),
+                content_range=f"bytes {start}-{end}/{len(content)}",
+            )
+
+        return StorageDownloadResult(
+            status_code=200,
+            content=content,
+            content_type="image/jpeg",
+            content_length=len(content),
+        )
+
     def delete(self, key: str) -> None:
         self.deleted.append(key)
         self.uploaded.pop(key, None)
@@ -233,10 +262,19 @@ class FakeGeminiService:
         self._output = output
         self.calls: list[tuple[int, object]] = []
         self._training_output = None
+        self._moderation_output = None
+        self.moderation_calls: list[int] = []
 
     def analyze_surf_media(self, images, context):
         self.calls.append((len(images), context))
         return self._output
+
+    def moderate_media_content(self, images, mime_type="image/jpeg"):
+        self.moderation_calls.append(len(images))
+        if self._moderation_output is not None:
+            return self._moderation_output
+        from app.services.ai import ModerationOutput
+        return ModerationOutput(surf_related=True, explicit_content=False, reason="Surf content.")
 
     def generate_training_plan(self, context):
         return self._training_output
@@ -277,6 +315,21 @@ def make_review_output(
             maneuvers=maneuvers,
             arms=arms,
         ),
+    )
+
+
+def make_moderation_output(
+    *,
+    surf_related: bool = True,
+    explicit_content: bool = False,
+    reason: str = "Surf content detected.",
+):
+    from app.services.ai import ModerationOutput
+
+    return ModerationOutput(
+        surf_related=surf_related,
+        explicit_content=explicit_content,
+        reason=reason,
     )
 
 

@@ -53,6 +53,12 @@ class ReviewOutput(BaseModel):
     scores: ScoreRubric
 
 
+class ModerationOutput(BaseModel):
+    surf_related: bool
+    explicit_content: bool
+    reason: str
+
+
 SYSTEM_PERSONA = (
     "Você é um treinador de surf experiente com 20 anos de experiência analisando vídeos e fotos de surfe. "
     "Forneça feedback estruturado e acionável calibrado ao nível de habilidade do surfista. "
@@ -76,6 +82,17 @@ OUTPUT_SCHEMA_INSTRUCTION = (
     '    "arms": number | null               // 0.0 – 10.0; null se o uso dos braços não for visível\n'
     "  }\n"
     "}"
+)
+
+
+MODERATION_PROMPT = (
+    "You are a content moderation system for a surf coaching app. "
+    "Analyse the provided image(s) and answer two questions: "
+    "1) Is this content related to surfing or water sports (surfing, bodyboarding, SUP, kitesurfing, ocean swimming)? "
+    "2) Does it contain explicit, adult, or offensive material?\n\n"
+    "Return ONLY valid JSON (no markdown, no preamble):\n"
+    '{"surf_related": boolean, "explicit_content": boolean, "reason": string}\n'
+    "reason: one short sentence explaining your decision."
 )
 
 
@@ -137,6 +154,35 @@ class GeminiService:
             raise AIParseFailedError() from e
         except ValueError as e:
             logger.exception("Gemini response was not valid JSON")
+            raise AIParseFailedError() from e
+
+    def moderate_media_content(
+        self,
+        images: list[bytes],
+        mime_type: str = "image/jpeg",
+    ) -> ModerationOutput:
+        import google.generativeai as genai
+        from google.generativeai import protos
+
+        genai.configure(api_key=self.api_key)
+        model = genai.GenerativeModel(self.model_name)
+
+        parts: list = [MODERATION_PROMPT]
+        for img in images:
+            parts.append(protos.Part(inline_data=protos.Blob(mime_type=mime_type, data=img)))
+
+        try:
+            response = model.generate_content(parts)
+            raw_text = getattr(response, "text", None) or ""
+        except Exception as e:
+            logger.exception("Gemini moderation API call failed")
+            raise AIGenerationFailedError() from e
+
+        cleaned = _strip_json_fences(raw_text)
+        try:
+            return ModerationOutput.model_validate_json(cleaned)
+        except (ValidationError, ValueError) as e:
+            logger.exception("Gemini moderation response parse failed")
             raise AIParseFailedError() from e
 
     def generate_training_plan(self, context: "TrainingContext") -> "TrainingPlanOutput":

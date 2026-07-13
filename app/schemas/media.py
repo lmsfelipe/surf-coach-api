@@ -18,7 +18,7 @@ class MediaOut(_CamelModel):
     id: UUID
     session_id: UUID
     media_type: Literal["image", "video"]
-    storage_url: str
+    content_url: str
     file_name: str
     file_size_bytes: int | None = None
     duration_seconds: float | None = None

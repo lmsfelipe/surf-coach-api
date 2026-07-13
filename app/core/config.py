@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     MAX_VIDEO_DURATION_SEC: int = Field(default=120, description="Video duration cap (s)")
     SUPABASE_BUCKET: str = Field(default="surf-media", description="Supabase Storage bucket")
     TRAINING_WORKOUTS_PER_PLAN: int = Field(default=3, description="Number of workouts Gemini generates per plan")
+    CONTENT_MODERATION_ENABLED: bool = Field(default=True, description="Run Gemini content moderation at upload time")
     CORS_ORIGINS: list[str] = Field(default=[], description="Allowed CORS origins")
 
     @property

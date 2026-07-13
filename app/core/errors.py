@@ -83,6 +83,24 @@ class VideoTooLongError(AppError):
     message = "Video exceeds the maximum allowed duration."
 
 
+class TooFewPhotosError(AppError):
+    code = "TOO_FEW_PHOTOS"
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    message = "At least 3 photos are required when uploading photos."
+
+
+class TooManyPhotosError(AppError):
+    code = "TOO_MANY_PHOTOS"
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    message = "A maximum of 10 photos can be uploaded at once."
+
+
+class TooManyVideosError(AppError):
+    code = "TOO_MANY_VIDEOS"
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    message = "A maximum of 3 videos can be uploaded at once."
+
+
 class NoMediaForSessionError(AppError):
     code = "NO_MEDIA_FOR_SESSION"
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
@@ -119,10 +137,28 @@ class SurfboardForbiddenError(AppError):
     message = "This surfboard does not belong to you."
 
 
+class TokenExpiredError(AppError):
+    code = "TOKEN_EXPIRED"
+    status_code = status.HTTP_401_UNAUTHORIZED
+    message = "The access token has expired."
+
+
+class RangeNotSatisfiableError(AppError):
+    code = "RANGE_NOT_SATISFIABLE"
+    status_code = 416
+    message = "The requested byte range is not satisfiable."
+
+
 class StorageUploadFailedError(AppError):
     code = "STORAGE_UPLOAD_FAILED"
     status_code = status.HTTP_502_BAD_GATEWAY
     message = "Media storage upload failed. Please try again."
+
+
+class StorageDownloadError(AppError):
+    code = "STORAGE_ERROR"
+    status_code = status.HTTP_502_BAD_GATEWAY
+    message = "Failed to retrieve media from storage."
 
 
 class AIGenerationFailedError(AppError):
@@ -141,6 +177,18 @@ class InvalidMediaError(AppError):
     code = "INVALID_MEDIA"
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
     message = "Media file could not be processed."
+
+
+class MediaNotSurfRelatedError(AppError):
+    code = "MEDIA_NOT_SURF_RELATED"
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    message = "Uploaded media does not appear to be surf or water sports related."
+
+
+class ExplicitContentError(AppError):
+    code = "EXPLICIT_CONTENT"
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    message = "Uploaded media contains explicit or offensive content."
 
 
 def _envelope(code: str, message: str, details: Any | None = None) -> dict[str, Any]:

@@ -23,12 +23,12 @@ class ReviewOut(_CamelModel):
     profile_id: UUID
     narrative: str
     improvement_tips: list[str]
-    score_flow: float
-    score_drop: float
-    score_balance: float
-    score_wave_selection: float
-    score_maneuvers: float
-    score_arms: float
-    overall_score: float
+    score_flow: float | None = None
+    score_drop: float | None = None
+    score_balance: float | None = None
+    score_wave_selection: float | None = None
+    score_maneuvers: float | None = None
+    score_arms: float | None = None
+    overall_score: float | None = None
     ai_model_version: str | None = None
     created_at: datetime
