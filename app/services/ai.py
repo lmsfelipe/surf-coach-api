@@ -124,19 +124,18 @@ class GeminiService:
         images: list[bytes],
         context: SurferContext,
     ) -> ReviewOutput:
-        import google.generativeai as genai
-        from google.generativeai import protos
+        from google import genai
+        from google.genai import types
 
-        genai.configure(api_key=self.api_key)
-        model = genai.GenerativeModel(self.model_name)
+        client = genai.Client(api_key=self.api_key)
 
         prompt = build_prompt(context)
         parts: list = [prompt]
         for img in images:
-            parts.append(protos.Part(inline_data=protos.Blob(mime_type="image/jpeg", data=img)))
+            parts.append(types.Part.from_bytes(data=img, mime_type="image/jpeg"))
 
         try:
-            response = model.generate_content(parts)
+            response = client.models.generate_content(model=self.model_name, contents=parts)
             text = getattr(response, "text", None) or ""
         except Exception as e:
             logger.exception("Gemini API call failed")
@@ -161,18 +160,17 @@ class GeminiService:
         images: list[bytes],
         mime_type: str = "image/jpeg",
     ) -> ModerationOutput:
-        import google.generativeai as genai
-        from google.generativeai import protos
+        from google import genai
+        from google.genai import types
 
-        genai.configure(api_key=self.api_key)
-        model = genai.GenerativeModel(self.model_name)
+        client = genai.Client(api_key=self.api_key)
 
         parts: list = [MODERATION_PROMPT]
         for img in images:
-            parts.append(protos.Part(inline_data=protos.Blob(mime_type=mime_type, data=img)))
+            parts.append(types.Part.from_bytes(data=img, mime_type=mime_type))
 
         try:
-            response = model.generate_content(parts)
+            response = client.models.generate_content(model=self.model_name, contents=parts)
             raw_text = getattr(response, "text", None) or ""
         except Exception as e:
             logger.exception("Gemini moderation API call failed")
@@ -186,10 +184,9 @@ class GeminiService:
             raise AIParseFailedError() from e
 
     def generate_training_plan(self, context: "TrainingContext") -> "TrainingPlanOutput":
-        import google.generativeai as genai
+        from google import genai
 
-        genai.configure(api_key=self.api_key)
-        model = genai.GenerativeModel(self.model_name)
+        client = genai.Client(api_key=self.api_key)
 
         workout_count = get_settings().TRAINING_WORKOUTS_PER_PLAN
         system_persona = (
@@ -225,7 +222,7 @@ class GeminiService:
         prompt = f"{system_persona}\n\nSurfer context:\n{context_block}\n\n{output_schema}"
 
         try:
-            response = model.generate_content(prompt)
+            response = client.models.generate_content(model=self.model_name, contents=prompt)
             raw_text = getattr(response, "text", None) or ""
         except Exception as e:
             logger.exception("Gemini API call failed (training plan)")

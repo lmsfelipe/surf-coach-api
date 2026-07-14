@@ -30,7 +30,7 @@ RUN pip install --upgrade pip \
         "python-jose[cryptography]>=3.3" \
         "httpx>=0.27" \
         "python-dotenv>=1.0" \
-        "google-generativeai>=0.7" \
+        "google-genai>=1.0" \
         "opencv-python-headless>=4.10" \
         "supabase>=2.0" \
         "python-magic>=0.4" \

@@ -180,10 +180,12 @@ class MediaService:
 
         if media_type == "image":
             images = [file_bytes]
+            moderation_mime = mime_type
         else:
             images = self.frame_extractor.extract(file_bytes, frame_count=3)
+            moderation_mime = "image/jpeg"
 
-        result = self.gemini.moderate_media_content(images, mime_type=mime_type)
+        result = self.gemini.moderate_media_content(images, mime_type=moderation_mime)
 
         if result.explicit_content:
             raise ExplicitContentError(details={"reason": result.reason})
