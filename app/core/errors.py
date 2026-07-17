@@ -119,6 +119,18 @@ class TrainingPlanAlreadyExistsError(AppError):
     message = "A training plan already exists for this review."
 
 
+class ReviewNotRetryableError(AppError):
+    code = "REVIEW_NOT_RETRYABLE"
+    status_code = status.HTTP_409_CONFLICT
+    message = "Only failed reviews can be retried."
+
+
+class TrainingPlanNotRetryableError(AppError):
+    code = "TRAINING_PLAN_NOT_RETRYABLE"
+    status_code = status.HTTP_409_CONFLICT
+    message = "Only failed training plans can be retried."
+
+
 class ReviewNotFoundError(AppError):
     code = "REVIEW_NOT_FOUND"
     status_code = status.HTTP_404_NOT_FOUND

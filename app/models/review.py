@@ -33,8 +33,12 @@ class Review(Base):
         ForeignKey("public.profiles.id", ondelete="CASCADE"),
         nullable=False,
     )
-    narrative: Mapped[str] = mapped_column(Text, nullable=False)
-    improvement_tips: Mapped[list[str]] = mapped_column(ARRAY(Text), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default="completed"
+    )
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    narrative: Mapped[str | None] = mapped_column(Text, nullable=True)
+    improvement_tips: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)
     score_flow: Mapped[Decimal | None] = mapped_column(Numeric(4, 1), nullable=True)
     score_drop: Mapped[Decimal | None] = mapped_column(Numeric(4, 1), nullable=True)
     score_balance: Mapped[Decimal | None] = mapped_column(Numeric(4, 1), nullable=True)
@@ -43,6 +47,9 @@ class Review(Base):
     score_arms: Mapped[Decimal | None] = mapped_column(Numeric(4, 1), nullable=True)
     overall_score: Mapped[Decimal | None] = mapped_column(Numeric(4, 1), nullable=True)
     ai_model_version: Mapped[str | None] = mapped_column(String, nullable=True)
+    processing_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

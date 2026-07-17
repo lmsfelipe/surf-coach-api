@@ -1,9 +1,15 @@
+import logging
 from uuid import UUID
 
+from arq import ArqRedis
 from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import db_session, get_current_user
+from app.core.deps import db_session, get_current_user, get_arq_pool
+
+logger = logging.getLogger(__name__)
+
+ENQUEUE_FAILED_MESSAGE = "Processing could not be started. Please try again."
 from app.core.security.jwt import AuthUser
 from app.repositories.ai import ReviewRepository, TrainingPlanRepository
 from app.repositories.auth import AuthRepository
@@ -45,14 +51,41 @@ async def list_training_plans(
     "/training-plans/",
     response_model=TrainingPlanResponse,
     response_model_by_alias=True,
-    status_code=status.HTTP_201_CREATED,
+    status_code=status.HTTP_202_ACCEPTED,
 )
 async def generate_training_plan(
     payload: GenerateTrainingPlanRequest,
     user: AuthUser = Depends(get_current_user),
     service: TrainingService = Depends(get_training_service),
+    arq_pool: ArqRedis = Depends(get_arq_pool),
 ) -> TrainingPlanResponse:
-    plan = await service.generate_training_plan(payload.review_id, user)
+    plan = await service.enqueue_training_plan(payload.review_id, user)
+    try:
+        await arq_pool.enqueue_job("process_training_plan_task", str(plan.id))
+    except Exception:
+        logger.exception("Failed to enqueue training plan %s", plan.id)
+        plan = await service.training_plan_repo.mark_failed(plan.id, ENQUEUE_FAILED_MESSAGE)
+    return TrainingPlanResponse.model_validate(plan)
+
+
+@router.post(
+    "/training-plans/{plan_id}/retry",
+    response_model=TrainingPlanResponse,
+    response_model_by_alias=True,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def retry_training_plan(
+    plan_id: UUID,
+    user: AuthUser = Depends(get_current_user),
+    service: TrainingService = Depends(get_training_service),
+    arq_pool: ArqRedis = Depends(get_arq_pool),
+) -> TrainingPlanResponse:
+    plan = await service.retry_training_plan(plan_id, user)
+    try:
+        await arq_pool.enqueue_job("process_training_plan_task", str(plan.id))
+    except Exception:
+        logger.exception("Failed to enqueue training plan %s", plan.id)
+        plan = await service.training_plan_repo.mark_failed(plan.id, ENQUEUE_FAILED_MESSAGE)
     return TrainingPlanResponse.model_validate(plan)
 
 

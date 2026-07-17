@@ -36,6 +36,8 @@ RUN pip install --upgrade pip \
         "python-magic>=0.4" \
         "aiofiles>=23.0" \
         "python-multipart>=0.0.9" \
+        "arq>=0.26" \
+        "redis>=5.0" \
         "pytest>=8.2" \
         "pytest-asyncio>=0.23" \
         "ruff>=0.5"

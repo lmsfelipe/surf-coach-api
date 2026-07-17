@@ -14,7 +14,9 @@ from app.core.errors import (
     NotFoundError,
     ReviewAlreadyExistsError,
     ReviewNotFoundError,
+    ReviewNotRetryableError,
     TrainingPlanAlreadyExistsError,
+    TrainingPlanNotRetryableError,
 )
 from app.core.frame_extractor import FrameExtractor
 from app.core.security.jwt import AuthUser
@@ -282,7 +284,11 @@ class ReviewService:
         self.storage = storage
         self.settings = get_settings()
 
-    async def generate_review(self, session_id: UUID, user: AuthUser) -> Review:
+    async def enqueue_review(self, session_id: UUID, user: AuthUser) -> Review:
+        """Validate inputs, create a pending review row, and return it.
+
+        The caller (API route) is responsible for enqueueing the worker job.
+        """
         session = await self.sessions_repo.get(session_id)
         if session is None:
             raise NotFoundError("Session not found.")
@@ -290,26 +296,52 @@ class ReviewService:
             raise ForbiddenError()
 
         existing = await self.review_repo.get_for_session(session_id)
-        if existing is not None:
+        if existing is not None and existing.status in ("completed", "processing"):
             raise ReviewAlreadyExistsError()
 
         media_items = await self.media_repo.list_for_session(session_id)
         if not media_items:
             raise NoMediaForSessionError()
 
-        profile = await self.auth_repo.get_profile(user.id)
+        # If a previously failed review exists, delete it so we can create fresh
+        if existing is not None and existing.status == "failed":
+            await self.review_repo.delete(existing.id)
+
+        return await self.review_repo.create_pending(
+            session_id=session_id, profile_id=user.id
+        )
+
+    async def process_review(self, review_id: UUID) -> Review:
+        """Heavy processing — called by the arq worker, not from an HTTP handler."""
+        import asyncio
+
+        review = await self.review_repo.get(review_id)
+        if review is None:
+            raise NotFoundError("Review not found.")
+
+        session = await self.sessions_repo.get(review.session_id)
+        if session is None:
+            raise NotFoundError("Session not found.")
+
+        media_items = await self.media_repo.list_for_session(review.session_id)
+
+        profile = await self.auth_repo.get_profile(review.profile_id)
         skill_level = profile.surf_level if profile else "beginner"
 
         all_frames: list[bytes] = []
         for item in media_items:
-            key = self._extract_key(item.storage_url, user.id, session_id, item.id)
+            key = self._extract_key(
+                item.storage_url, review.profile_id, review.session_id, item.id
+            )
             if not key:
                 logger.warning("Could not derive storage key for media %s", item.id)
                 continue
-            raw = self.storage.download(key)
+            raw = await asyncio.to_thread(self.storage.download, key)
             if item.media_type == "video":
-                frames = self.frame_extractor.extract(
-                    raw, frame_count=self.settings.FRAME_EXTRACT_COUNT
+                frames = await asyncio.to_thread(
+                    self.frame_extractor.extract,
+                    raw,
+                    self.settings.FRAME_EXTRACT_COUNT,
                 )
                 all_frames.extend(frames)
             else:
@@ -332,7 +364,9 @@ class ReviewService:
             notes=session.notes,
         )
 
-        review_output = self.gemini.analyze_surf_media(all_frames, context)
+        review_output = await asyncio.to_thread(
+            self.gemini.analyze_surf_media, all_frames, context
+        )
 
         if len(review_output.improvement_tips) != 3:
             tips = list(review_output.improvement_tips)
@@ -348,9 +382,8 @@ class ReviewService:
 
         normalised = normalise_scores(review_output.scores)
 
-        review = await self.review_repo.create(
-            session_id=session_id,
-            profile_id=user.id,
+        return await self.review_repo.mark_completed(
+            review_id,
             narrative=review_output.narrative,
             improvement_tips=review_output.improvement_tips,
             score_flow=normalised["flow"],
@@ -362,7 +395,17 @@ class ReviewService:
             overall_score=normalised["overall"],
             ai_model_version=self.settings.GEMINI_MODEL,
         )
-        return review
+
+    async def retry_review(self, review_id: UUID, user: AuthUser) -> Review:
+        """Reset a failed review to processing. Caller enqueues the worker job."""
+        review = await self.review_repo.get(review_id)
+        if review is None:
+            raise NotFoundError("Review not found.")
+        if review.profile_id != user.id:
+            raise ForbiddenError()
+        if review.status != "failed":
+            raise ReviewNotRetryableError()
+        return await self.review_repo.reset_for_retry(review_id)
 
     async def get_review(self, review_id: UUID, user: AuthUser) -> Review:
         review = await self.review_repo.get(review_id)
@@ -447,9 +490,10 @@ class TrainingService:
         self.gemini = gemini
         self.settings = get_settings()
 
-    async def generate_training_plan(
+    async def enqueue_training_plan(
         self, review_id: UUID, user: AuthUser
     ) -> TrainingPlan:
+        """Validate inputs, create a pending plan row, and return it."""
         review = await self.review_repo.get(review_id)
         if review is None:
             raise ReviewNotFoundError()
@@ -457,10 +501,29 @@ class TrainingService:
             raise ForbiddenError()
 
         existing = await self.training_plan_repo.get_by_review_id(review_id)
-        if existing is not None:
+        if existing is not None and existing.status in ("completed", "processing"):
             raise TrainingPlanAlreadyExistsError()
 
-        profile = await self.auth_repo.get_profile(user.id)
+        if existing is not None and existing.status == "failed":
+            await self.training_plan_repo.delete(existing.id)
+
+        return await self.training_plan_repo.create_pending(
+            review_id=review_id, profile_id=user.id
+        )
+
+    async def process_training_plan(self, plan_id: UUID) -> TrainingPlan:
+        """Heavy processing — called by the arq worker."""
+        import asyncio
+
+        plan = await self.training_plan_repo.get_by_id(plan_id)
+        if plan is None:
+            raise NotFoundError("Training plan not found.")
+
+        review = await self.review_repo.get(plan.review_id)
+        if review is None:
+            raise ReviewNotFoundError()
+
+        profile = await self.auth_repo.get_profile(plan.profile_id)
 
         context = TrainingContext(
             surf_level=profile.surf_level if profile else "beginner",
@@ -476,7 +539,7 @@ class TrainingService:
             weight_kg=profile.weight_kg if profile else None,
         )
 
-        plan_output = self.gemini.generate_training_plan(context)
+        plan_output = await asyncio.to_thread(self.gemini.generate_training_plan, context)
 
         workouts_data = [
             {
@@ -497,12 +560,24 @@ class TrainingService:
             for w in plan_output.workouts
         ]
 
-        return await self.training_plan_repo.create(
-            review_id=review_id,
-            profile_id=user.id,
+        return await self.training_plan_repo.mark_completed(
+            plan_id,
             ai_model_version=self.settings.GEMINI_MODEL,
             workouts=workouts_data,
         )
+
+    async def retry_training_plan(
+        self, plan_id: UUID, user: AuthUser
+    ) -> TrainingPlan:
+        """Reset a failed plan to processing. Caller enqueues the worker job."""
+        plan = await self.training_plan_repo.get_by_id(plan_id)
+        if plan is None:
+            raise NotFoundError("Training plan not found.")
+        if plan.profile_id != user.id:
+            raise ForbiddenError()
+        if plan.status != "failed":
+            raise TrainingPlanNotRetryableError()
+        return await self.training_plan_repo.reset_for_retry(plan_id)
 
     async def list_plans(self, user: AuthUser) -> list[TrainingPlan]:
         return await self.training_plan_repo.list_for_profile(user.id)

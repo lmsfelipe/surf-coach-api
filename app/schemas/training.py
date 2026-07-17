@@ -42,10 +42,12 @@ class TrainingPlanResponse(_CamelModel):
     id: UUID
     review_id: UUID
     profile_id: UUID
+    status: str
+    error_message: str | None = None
     generated_by: str
     ai_model_version: str | None = None
     created_at: datetime
-    workouts: list[WorkoutResponse]
+    workouts: list[WorkoutResponse] = []
 
 
 class TrainingPlanListResponse(_CamelModel):

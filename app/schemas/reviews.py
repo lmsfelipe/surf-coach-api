@@ -21,8 +21,10 @@ class ReviewOut(_CamelModel):
     id: UUID
     session_id: UUID
     profile_id: UUID
-    narrative: str
-    improvement_tips: list[str]
+    status: str
+    error_message: str | None = None
+    narrative: str | None = None
+    improvement_tips: list[str] | None = None
     score_flow: float | None = None
     score_drop: float | None = None
     score_balance: float | None = None

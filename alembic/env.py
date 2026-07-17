@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from app.core.config import get_settings
 from app.core.db import Base
-from app.models import media, profile, review, session, surfboard  # noqa: F401 — register on Base.metadata
+from app.models import media, profile, review, session, surfboard, training_plan, workout, exercise  # noqa: F401 — register on Base.metadata
 
 config = context.config
 

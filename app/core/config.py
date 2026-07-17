@@ -32,6 +32,10 @@ class Settings(BaseSettings):
     SUPABASE_BUCKET: str = Field(default="surf-media", description="Supabase Storage bucket")
     TRAINING_WORKOUTS_PER_PLAN: int = Field(default=3, description="Number of workouts Gemini generates per plan")
     CONTENT_MODERATION_ENABLED: bool = Field(default=True, description="Run Gemini content moderation at upload time")
+    REDIS_URL: str = Field(default="redis://localhost:6379", description="Redis URL for arq task queue")
+    WORKER_MAX_JOBS: int = Field(default=10, description="Max concurrent jobs per arq worker process")
+    WORKER_JOB_TIMEOUT_SEC: int = Field(default=240, description="Per-job timeout in the arq worker (s); lowered to 240 so timeout failures surface within the 5-min polling window")
+    STUCK_JOB_THRESHOLD_SEC: int = Field(default=600, description="Sweeper marks processing rows older than this as failed (s); must exceed job timeout + worst-case queue wait")
     CORS_ORIGINS: list[str] = Field(default=[], description="Allowed CORS origins")
 
     @property
