@@ -1,7 +1,7 @@
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.media import Media
@@ -47,3 +47,27 @@ class MediaRepository:
     async def delete(self, media: Media) -> None:
         await self.db.delete(media)
         await self.db.commit()
+
+    async def mark_optimized(self, media_id: UUID, size_bytes: int) -> None:
+        await self.db.execute(
+            text(
+                "UPDATE public.media "
+                "SET optimized_at = now(), file_size_bytes = :size "
+                "WHERE id = :id"
+            ),
+            {"id": str(media_id), "size": size_bytes},
+        )
+        await self.db.commit()
+
+    async def list_unoptimized_videos(
+        self, older_than_sec: int, limit: int
+    ) -> list[Media]:
+        result = await self.db.execute(
+            select(Media).where(
+                Media.media_type == "video",
+                Media.optimized_at.is_(None),
+                Media.created_at < text("now() - make_interval(secs => :older_than_sec)"),
+            ).order_by(Media.created_at).limit(limit),
+            {"older_than_sec": older_than_sec},
+        )
+        return list(result.scalars().all())

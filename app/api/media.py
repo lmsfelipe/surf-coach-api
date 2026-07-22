@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.deps import db_session, get_current_user
+from app.core.rate_limit import limiter
 from app.core.errors import NotFoundError
 from app.core.frame_extractor import FrameExtractor
 from app.core.security.jwt import AuthUser
@@ -79,7 +80,9 @@ def _storage_key_from_url(url: str) -> str:
     response_model_by_alias=True,
     status_code=status.HTTP_201_CREATED,
 )
+@limiter.limit(lambda: get_settings().RATE_LIMIT_UPLOAD)
 async def upload_media(
+    request: Request,
     session_id: UUID,
     file: list[UploadFile] = File(...),
     user: AuthUser = Depends(get_current_user),

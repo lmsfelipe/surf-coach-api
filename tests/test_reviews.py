@@ -214,6 +214,30 @@ def test_parse_response_accepts_fenced_json():
     assert out.narrative == "ok"
 
 
+def test_parse_response_accepts_trailing_commas():
+    """Gemini occasionally emits a trailing comma; it must not cost the whole review."""
+    raw = (
+        '{"narrative":"ok",'
+        '"improvement_tips":["a","b","c",],'
+        '"scores":{"flow":5,"drop":5,"balance":5,'
+        '"wave_selection":5,"maneuvers":5,"arms":5,},}'
+    )
+    out = GeminiService.parse_response(raw)
+    assert isinstance(out, ReviewOutput)
+    assert out.improvement_tips == ["a", "b", "c"]
+    assert out.scores.arms == 5
+
+
+def test_parse_response_keeps_commas_inside_strings():
+    raw = (
+        '{"narrative":"drop, bottom turn, and cutback",'
+        '"improvement_tips":["a","b","c"],'
+        '"scores":{"flow":5,"drop":5,"balance":5,"wave_selection":5,"maneuvers":5,"arms":5}}'
+    )
+    out = GeminiService.parse_response(raw)
+    assert out.narrative == "drop, bottom turn, and cutback"
+
+
 def test_parse_response_rejects_missing_field():
     from app.core.errors import AIParseFailedError
 

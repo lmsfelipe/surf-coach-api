@@ -1,6 +1,7 @@
 """Tests for Phase 3: AI-Generated Training Plans."""
 from __future__ import annotations
 
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -127,11 +128,15 @@ def test_training_context_from_review_and_profile():
 # ---------------------------------------------------------------------------
 
 def test_training_plan_output_parses_valid_json():
+    exercise = json.dumps(
+        {"name": "Ex", "description": "D", "sets": 3, "reps": "10", "video_url": None}
+    )
+    exercises = ",".join([exercise] * 5)
     raw = (
         '{"workouts": ['
         + ",".join(
             f'{{"sequence_number": {i}, "title": "T{i}", "focus_area": "F{i}",'
-            f'"exercises": [{",".join(["{\\"name\\":\\"Ex\\",\\"description\\":\\"D\\",\\"sets\\":3,\\"reps\\":\\"10\\",\\"video_url\\":null}"] * 5)}]}}'
+            f'"exercises": [{exercises}]}}'
             for i in range(1, 4)
         )
         + "]}"

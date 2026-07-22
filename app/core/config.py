@@ -37,6 +37,42 @@ class Settings(BaseSettings):
     WORKER_JOB_TIMEOUT_SEC: int = Field(default=240, description="Per-job timeout in the arq worker (s); lowered to 240 so timeout failures surface within the 5-min polling window")
     STUCK_JOB_THRESHOLD_SEC: int = Field(default=600, description="Sweeper marks processing rows older than this as failed (s); must exceed job timeout + worst-case queue wait")
     CORS_ORIGINS: list[str] = Field(default=[], description="Allowed CORS origins")
+    ALLOWED_HOSTS: list[str] = Field(
+        default=[],
+        description=(
+            "Allowed Host headers in production (empty = allow all). When set, include "
+            "your platform's health-check host, e.g. 'healthcheck.railway.app'."
+        ),
+    )
+
+    RATE_LIMIT_AI: str = Field(default="5/hour", description="Rate limit for AI endpoints per user")
+    RATE_LIMIT_UPLOAD: str = Field(
+        default="30/hour", description="Rate limit for upload endpoints per user"
+    )
+    RATE_LIMIT_DEFAULT: str = Field(
+        default="120/minute", description="Default rate limit per user"
+    )
+    RATE_LIMIT_ENABLED: bool = Field(default=True, description="Enable/disable rate limiting")
+
+    SENTRY_DSN: str = Field(default="", description="Sentry DSN (empty = disabled)")
+
+    VIDEO_OPTIMIZE_ENABLED: bool = Field(
+        default=True, description="Master switch for video optimization (task + sweep)"
+    )
+    VIDEO_TARGET_HEIGHT: int = Field(
+        default=720, description="Max output height; caps long-edge, never upscales"
+    )
+    VIDEO_CRF: int = Field(default=28, description="CRF quality/size knob (lower = better/larger)")
+    VIDEO_KEEP_AUDIO: bool = Field(default=True, description="Keep low-bitrate audio vs strip it")
+    VIDEO_AUDIO_BITRATE_KBPS: int = Field(
+        default=96, description="Audio bitrate when kept (kbps)"
+    )
+    VIDEO_OPTIMIZE_GRACE_SEC: int = Field(
+        default=900, description="Delay after upload before compressing (s)"
+    )
+    VIDEO_OPTIMIZE_BATCH: int = Field(
+        default=20, description="Max videos enqueued per sweep tick"
+    )
 
     @property
     def is_development(self) -> bool:

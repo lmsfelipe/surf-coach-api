@@ -1,14 +1,14 @@
-import logging
 from dataclasses import dataclass
 from functools import lru_cache
 
 import httpx
+import structlog
 from supabase import Client, create_client
 
 from app.core.config import get_settings
 from app.core.errors import RangeNotSatisfiableError, StorageDownloadError, StorageUploadFailedError
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 @dataclass

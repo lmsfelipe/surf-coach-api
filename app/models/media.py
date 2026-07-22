@@ -28,6 +28,9 @@ class Media(Base):
     file_name: Mapped[str] = mapped_column(String, nullable=False)
     file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     duration_seconds: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    optimized_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

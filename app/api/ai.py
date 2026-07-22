@@ -1,19 +1,26 @@
-import logging
 from uuid import UUID
 
+import structlog
 from arq import ArqRedis
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import db_session, get_current_user, get_arq_pool
+from app.core.config import get_settings
+from app.core.deps import db_session, get_arq_pool, get_current_user
+from app.core.rate_limit import limiter
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 ENQUEUE_FAILED_MESSAGE = "Processing could not be started. Please try again."
 from app.core.security.jwt import AuthUser
 from app.repositories.ai import ReviewRepository, TrainingPlanRepository
 from app.repositories.auth import AuthRepository
-from app.schemas.training import GenerateTrainingPlanRequest, TrainingPlanListResponse, TrainingPlanResponse, WorkoutResponse
+from app.schemas.training import (
+    GenerateTrainingPlanRequest,
+    TrainingPlanListResponse,
+    TrainingPlanResponse,
+    WorkoutResponse,
+)
 from app.services.ai import GeminiService, TrainingService
 
 router = APIRouter(prefix="/api/v1", tags=["training"])
@@ -53,7 +60,9 @@ async def list_training_plans(
     response_model_by_alias=True,
     status_code=status.HTTP_202_ACCEPTED,
 )
+@limiter.limit(lambda: get_settings().RATE_LIMIT_AI)
 async def generate_training_plan(
+    request: Request,
     payload: GenerateTrainingPlanRequest,
     user: AuthUser = Depends(get_current_user),
     service: TrainingService = Depends(get_training_service),
@@ -74,7 +83,9 @@ async def generate_training_plan(
     response_model_by_alias=True,
     status_code=status.HTTP_202_ACCEPTED,
 )
+@limiter.limit(lambda: get_settings().RATE_LIMIT_AI)
 async def retry_training_plan(
+    request: Request,
     plan_id: UUID,
     user: AuthUser = Depends(get_current_user),
     service: TrainingService = Depends(get_training_service),

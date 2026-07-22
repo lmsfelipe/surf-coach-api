@@ -12,35 +12,21 @@ RUN apt-get update \
         build-essential \
         libpq-dev \
         libmagic1 \
+        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 RUN python -m venv "$VIRTUAL_ENV"
 
 FROM base AS deps
 WORKDIR /app
 COPY pyproject.toml ./
-RUN pip install --upgrade pip \
-    && pip install \
-        "fastapi>=0.115" \
-        "uvicorn[standard]>=0.30" \
-        "pydantic>=2.7" \
-        "pydantic-settings>=2.3" \
-        "sqlalchemy>=2.0" \
-        "asyncpg>=0.29" \
-        "alembic>=1.13" \
-        "python-jose[cryptography]>=3.3" \
-        "httpx>=0.27" \
-        "python-dotenv>=1.0" \
-        "google-genai>=1.0" \
-        "opencv-python-headless>=4.10" \
-        "supabase>=2.0" \
-        "python-magic>=0.4" \
-        "aiofiles>=23.0" \
-        "python-multipart>=0.0.9" \
-        "arq>=0.26" \
-        "redis>=5.0" \
-        "pytest>=8.2" \
-        "pytest-asyncio>=0.23" \
-        "ruff>=0.5"
+# Install dependencies from pyproject so the image never drifts from the declared set.
+# A stub package satisfies the build backend; the real code is COPYed in later stages
+# and the project itself is uninstalled so only its dependencies remain.
+RUN mkdir -p app && touch app/__init__.py \
+    && pip install --upgrade pip \
+    && pip install ".[dev]" \
+    && pip uninstall -y surf-coach-api \
+    && rm -rf app *.egg-info
 
 FROM deps AS dev
 WORKDIR /app

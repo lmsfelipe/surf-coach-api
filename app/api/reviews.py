@@ -1,13 +1,15 @@
-import logging
 from uuid import UUID
 
+import structlog
 from arq import ArqRedis
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.deps import db_session, get_current_user, get_arq_pool
+from app.core.config import get_settings
+from app.core.deps import db_session, get_arq_pool, get_current_user
+from app.core.rate_limit import limiter
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 ENQUEUE_FAILED_MESSAGE = "Processing could not be started. Please try again."
 from app.core.frame_extractor import FrameExtractor
@@ -56,7 +58,9 @@ def get_review_service(
     response_model_by_alias=True,
     status_code=status.HTTP_202_ACCEPTED,
 )
+@limiter.limit(lambda: get_settings().RATE_LIMIT_AI)
 async def create_review(
+    request: Request,
     payload: ReviewCreate,
     user: AuthUser = Depends(get_current_user),
     service: ReviewService = Depends(get_review_service),
@@ -77,7 +81,9 @@ async def create_review(
     response_model_by_alias=True,
     status_code=status.HTTP_202_ACCEPTED,
 )
+@limiter.limit(lambda: get_settings().RATE_LIMIT_AI)
 async def retry_review(
+    request: Request,
     review_id: UUID,
     user: AuthUser = Depends(get_current_user),
     service: ReviewService = Depends(get_review_service),

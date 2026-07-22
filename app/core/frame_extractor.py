@@ -1,12 +1,12 @@
-import logging
 import os
 import tempfile
 
 import cv2
+import structlog
 
 from app.core.errors import InvalidMediaError
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class FrameExtractor:

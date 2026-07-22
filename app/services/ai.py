@@ -1,9 +1,9 @@
 import json
-import logging
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, Field, ValidationError
+import structlog
+from pydantic import BaseModel, Field
 
 from app.core.config import get_settings
 from app.core.errors import (
@@ -29,7 +29,7 @@ from app.repositories.media import MediaRepository
 from app.repositories.sessions import SessionsRepository
 from app.repositories.surfboards import SurfboardRepository
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class SurferContext(BaseModel):
@@ -115,6 +115,38 @@ def _strip_json_fences(text: str) -> str:
     return stripped
 
 
+def _strip_trailing_commas(text: str) -> str:
+    """Drop commas that directly precede a closing brace/bracket.
+
+    Schema-constrained generation should make this unnecessary, but a malformed
+    trailing comma is the one syntax slip models still produce, and it costs a
+    whole review to reject. Commas inside string literals are left untouched.
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for i, ch in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+            out.append(ch)
+            continue
+        if ch == '"':
+            in_string = True
+            out.append(ch)
+            continue
+        if ch == ",":
+            rest = text[i + 1 :]
+            if rest.lstrip()[:1] in ("}", "]"):
+                continue
+        out.append(ch)
+    return "".join(out)
+
+
 class GeminiService:
     def __init__(self, api_key: str | None = None, model_name: str | None = None) -> None:
         self.settings = get_settings()
@@ -137,7 +169,14 @@ class GeminiService:
             parts.append(types.Part.from_bytes(data=img, mime_type="image/jpeg"))
 
         try:
-            response = client.models.generate_content(model=self.model_name, contents=parts)
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=parts,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ReviewOutput,
+                ),
+            )
             text = getattr(response, "text", None) or ""
         except Exception as e:
             logger.exception("Gemini API call failed")
@@ -148,14 +187,16 @@ class GeminiService:
     @staticmethod
     def parse_response(raw_text: str) -> ReviewOutput:
         cleaned = _strip_json_fences(raw_text)
+        # ValidationError subclasses ValueError, so this catches both a schema
+        # mismatch and malformed JSON; the retry only rescues the latter.
         try:
             return ReviewOutput.model_validate_json(cleaned)
-        except ValidationError as e:
-            logger.exception("Gemini response failed Pydantic validation")
-            raise AIParseFailedError() from e
         except ValueError as e:
-            logger.exception("Gemini response was not valid JSON")
-            raise AIParseFailedError() from e
+            try:
+                return ReviewOutput.model_validate_json(_strip_trailing_commas(cleaned))
+            except ValueError:
+                logger.exception("Gemini response could not be parsed")
+                raise AIParseFailedError() from e
 
     def moderate_media_content(
         self,
@@ -172,7 +213,14 @@ class GeminiService:
             parts.append(types.Part.from_bytes(data=img, mime_type=mime_type))
 
         try:
-            response = client.models.generate_content(model=self.model_name, contents=parts)
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=parts,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ModerationOutput,
+                ),
+            )
             raw_text = getattr(response, "text", None) or ""
         except Exception as e:
             logger.exception("Gemini moderation API call failed")
@@ -181,12 +229,16 @@ class GeminiService:
         cleaned = _strip_json_fences(raw_text)
         try:
             return ModerationOutput.model_validate_json(cleaned)
-        except (ValidationError, ValueError) as e:
-            logger.exception("Gemini moderation response parse failed")
-            raise AIParseFailedError() from e
+        except ValueError as e:
+            try:
+                return ModerationOutput.model_validate_json(_strip_trailing_commas(cleaned))
+            except ValueError:
+                logger.exception("Gemini moderation response parse failed")
+                raise AIParseFailedError() from e
 
     def generate_training_plan(self, context: "TrainingContext") -> "TrainingPlanOutput":
         from google import genai
+        from google.genai import types
 
         client = genai.Client(api_key=self.api_key)
 
@@ -224,7 +276,14 @@ class GeminiService:
         prompt = f"{system_persona}\n\nSurfer context:\n{context_block}\n\n{output_schema}"
 
         try:
-            response = client.models.generate_content(model=self.model_name, contents=prompt)
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=TrainingPlanOutput,
+                ),
+            )
             raw_text = getattr(response, "text", None) or ""
         except Exception as e:
             logger.exception("Gemini API call failed (training plan)")
@@ -233,9 +292,12 @@ class GeminiService:
         cleaned = _strip_json_fences(raw_text)
         try:
             output = TrainingPlanOutput.model_validate_json(cleaned)
-        except (ValidationError, ValueError) as e:
-            logger.exception("Gemini training plan response failed parsing")
-            raise AIParseFailedError() from e
+        except ValueError as e:
+            try:
+                output = TrainingPlanOutput.model_validate_json(_strip_trailing_commas(cleaned))
+            except ValueError:
+                logger.exception("Gemini training plan response failed parsing")
+                raise AIParseFailedError() from e
 
         if len(output.workouts) != workout_count:
             raise AIParseFailedError(

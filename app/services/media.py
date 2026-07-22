@@ -1,8 +1,8 @@
-import logging
 from decimal import Decimal
 from uuid import UUID, uuid4
 
 import magic
+import structlog
 
 from app.core.config import get_settings
 from app.core.errors import (
@@ -24,7 +24,7 @@ from app.models.media import Media
 from app.repositories.media import MediaRepository
 from app.repositories.sessions import SessionsRepository
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}

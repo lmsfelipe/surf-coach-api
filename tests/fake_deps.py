@@ -105,6 +105,40 @@ class FakeMediaRepo:
         self._store.pop(media.id, None)
 
 
+    async def mark_optimized(self, media_id: UUID, size_bytes: int) -> None:
+        media = self._store.get(media_id)
+        if media:
+            media.optimized_at = datetime.now(tz=timezone.utc)
+            media.file_size_bytes = size_bytes
+
+    async def list_unoptimized_videos(
+        self, older_than_sec: int, limit: int
+    ) -> list[Media]:
+        return [
+            m
+            for m in self._store.values()
+            if m.media_type == "video" and m.optimized_at is None
+        ][:limit]
+
+
+class FakeVideoTranscoder:
+    def __init__(
+        self,
+        output: bytes = b"compressed-mp4-bytes",
+        *,
+        raise_exc: Exception | None = None,
+    ) -> None:
+        self._output = output
+        self._raise_exc = raise_exc
+        self.calls: list[int] = []
+
+    async def transcode(self, video_bytes: bytes) -> bytes:
+        self.calls.append(len(video_bytes))
+        if self._raise_exc:
+            raise self._raise_exc
+        return self._output
+
+
 class FakeReviewRepo:
     def __init__(self) -> None:
         self._store: dict[UUID, Review] = {}
