@@ -33,11 +33,18 @@ logger = structlog.get_logger(__name__)
 
 
 class SurferContext(BaseModel):
+    """Objective, media-independent facts used to calibrate the visual analysis.
+
+    The surfer's own free-text description is deliberately NOT part of this
+    context: it must never reach the scoring pass, or an optimistic/pessimistic
+    tone in the text skews the scores. The description is applied afterwards, in
+    a second pass, to personalise the narrative only. See ``ReviewService``.
+    """
+
     skill_level: str
     location: str
     wave_conditions: str | None = None
     board_type: str | None = None
-    notes: str | None = None
 
 
 class ScoreRubric(BaseModel):
@@ -53,6 +60,15 @@ class ReviewOutput(BaseModel):
     narrative: str
     improvement_tips: list[str]
     scores: ScoreRubric
+
+
+class NarrativeRefinement(BaseModel):
+    """Second-pass output: the narrative/tips personalised with the surfer's
+    description. Scores are intentionally absent — they stay locked to the
+    media-only analysis and are never regenerated here."""
+
+    narrative: str
+    improvement_tips: list[str]
 
 
 class ModerationOutput(BaseModel):
@@ -98,9 +114,55 @@ MODERATION_PROMPT = (
 )
 
 
+REFINE_PERSONA = (
+    "Você é o mesmo treinador de surf experiente. "
+    "Você JÁ analisou as mídias e produziu a avaliação técnica abaixo, "
+    "baseada EXCLUSIVAMENTE no que estava visível nas imagens. "
+    "Agora o surfista compartilhou um relato pessoal sobre a sessão. "
+    "Use esse relato APENAS para tornar a narrativa e as dicas mais relevantes e pessoais — "
+    "por exemplo, reconhecendo as sensações, dúvidas ou objetivos que o surfista mencionou. "
+    "NUNCA deixe o tom do relato (otimista ou pessimista) mudar a sua avaliação técnica: "
+    "ela reflete apenas o que foi observado nas mídias, e as pontuações permanecem inalteradas. "
+    "Não contradiga a evidência visual. Mantenha exatamente 3 dicas acionáveis."
+)
+
+REFINE_OUTPUT_SCHEMA_INSTRUCTION = (
+    "Retorne SOMENTE JSON válido (sem markdown, sem preâmbulo, sem comentários extras) "
+    "seguindo este schema:\n"
+    "{\n"
+    '  "narrative": string,                            // narrativa refinada que incorpora o relato\n'  # noqa: E501
+    '  "improvement_tips": [string, string, string]    // exatamente 3 dicas acionáveis\n'
+    "}"
+)
+
+
 def build_prompt(context: SurferContext) -> str:
     context_block = json.dumps(context.model_dump(), ensure_ascii=False, indent=2)
     return f"{SYSTEM_PERSONA}\n\nSurfer context:\n{context_block}\n\n{OUTPUT_SCHEMA_INSTRUCTION}"
+
+
+def build_refinement_prompt(
+    review: ReviewOutput,
+    context: SurferContext,
+    description: str,
+) -> str:
+    review_block = json.dumps(
+        {
+            "narrative": review.narrative,
+            "improvement_tips": review.improvement_tips,
+            "scores": review.scores.model_dump(),
+        },
+        ensure_ascii=False,
+        indent=2,
+    )
+    context_block = json.dumps(context.model_dump(), ensure_ascii=False, indent=2)
+    return (
+        f"{REFINE_PERSONA}\n\n"
+        f"Contexto objetivo do surfista:\n{context_block}\n\n"
+        f"Avaliação técnica baseada nas mídias (pontuações fixas):\n{review_block}\n\n"
+        f"Relato do surfista sobre a sessão:\n{description}\n\n"
+        f"{REFINE_OUTPUT_SCHEMA_INSTRUCTION}"
+    )
 
 
 def _strip_json_fences(text: str) -> str:
@@ -192,6 +254,56 @@ class GeminiService:
                 return ReviewOutput.model_validate_json(_strip_trailing_commas(cleaned))
             except ValueError:
                 logger.exception("Gemini response could not be parsed")
+                raise AIParseFailedError() from e
+
+    def refine_review_with_description(
+        self,
+        review: ReviewOutput,
+        context: SurferContext,
+        description: str,
+    ) -> ReviewOutput:
+        """Second pass: personalise the narrative/tips using the surfer's
+        free-text description. Scores stay locked to the media-only ``review``
+        — they are copied through here and never regenerated, so the tone of
+        the description cannot move them.
+        """
+        from google import genai
+        from google.genai import types
+
+        client = genai.Client(api_key=self.api_key)
+
+        prompt = build_refinement_prompt(review, context, description)
+        try:
+            response = client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=NarrativeRefinement,
+                ),
+            )
+            text = getattr(response, "text", None) or ""
+        except Exception as e:
+            logger.exception("Gemini refinement call failed")
+            raise AIGenerationFailedError() from e
+
+        refinement = self.parse_refinement(text)
+        return ReviewOutput(
+            narrative=refinement.narrative,
+            improvement_tips=refinement.improvement_tips,
+            scores=review.scores,
+        )
+
+    @staticmethod
+    def parse_refinement(raw_text: str) -> NarrativeRefinement:
+        cleaned = _strip_json_fences(raw_text)
+        try:
+            return NarrativeRefinement.model_validate_json(cleaned)
+        except ValueError as e:
+            try:
+                return NarrativeRefinement.model_validate_json(_strip_trailing_commas(cleaned))
+            except ValueError:
+                logger.exception("Gemini refinement response could not be parsed")
                 raise AIParseFailedError() from e
 
     def moderate_media_content(
@@ -415,10 +527,30 @@ class ReviewService:
             location=session.location,
             wave_conditions=f"{session.wave_size} m",
             board_type=board_type,
-            notes=session.notes,
         )
 
+        # Pass 1 — score the media in isolation. The surfer's description is
+        # deliberately kept out of this call so its tone cannot bias the scores.
         review_output = await asyncio.to_thread(self.gemini.analyze_surf_media, all_frames, context)
+
+        # Pass 2 — personalise the narrative/tips with the surfer's description.
+        # Scores are locked to pass 1 (see refine_review_with_description). This
+        # is best-effort: if it fails we keep the media-only review rather than
+        # failing the whole job.
+        description = (session.notes or "").strip()
+        if description:
+            try:
+                review_output = await asyncio.to_thread(
+                    self.gemini.refine_review_with_description,
+                    review_output,
+                    context,
+                    description,
+                )
+            except (AIGenerationFailedError, AIParseFailedError):
+                logger.warning(
+                    "Description refinement failed; keeping media-only review",
+                    review_id=str(review_id),
+                )
 
         if len(review_output.improvement_tips) != 3:
             tips = list(review_output.improvement_tips)

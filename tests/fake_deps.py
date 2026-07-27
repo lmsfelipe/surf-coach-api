@@ -453,10 +453,26 @@ class FakeGeminiService:
         self._training_output = None
         self._moderation_output = None
         self.moderation_calls: list[int] = []
+        self.refine_calls: list[tuple[object, object, str]] = []
+        self._refined_output = None
 
     def analyze_surf_media(self, images, context):
         self.calls.append((len(images), context))
         return self._output
+
+    def refine_review_with_description(self, review, context, description):
+        self.refine_calls.append((review, context, description))
+        if self._refined_output is not None:
+            return self._refined_output
+        # Default fake behaviour mirrors the real service's contract: the
+        # narrative may change, but scores are copied straight from pass 1.
+        from app.services.ai import ReviewOutput
+
+        return ReviewOutput(
+            narrative=review.narrative,
+            improvement_tips=review.improvement_tips,
+            scores=review.scores,
+        )
 
     def moderate_media_content(self, images, mime_type="image/jpeg"):
         self.moderation_calls.append(len(images))

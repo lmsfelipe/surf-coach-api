@@ -323,7 +323,6 @@ def test_prompt_includes_context_fields():
         location="Praia de Santos",
         wave_conditions="overhead",
         board_type="shortboard",
-        notes="felt smooth",
     )
     prompt = build_prompt(ctx)
     assert "intermediate" in prompt
@@ -331,3 +330,89 @@ def test_prompt_includes_context_fields():
     assert "shortboard" in prompt
     assert "narrative" in prompt
     assert "scores" in prompt
+
+
+def test_scoring_pass_never_sees_the_surfer_description():
+    """The surfer's free-text description must not reach the scoring context —
+    that is what used to bias the scores toward the surfer's own tone."""
+    from app.services.ai import SurferContext, build_prompt, build_refinement_prompt
+
+    # SurferContext has no field for the description at all.
+    assert "notes" not in SurferContext.model_fields
+    ctx = SurferContext(skill_level="beginner", location="Maresias")
+    assert "felt amazing" not in build_prompt(ctx)
+
+    # The description only appears in the second-pass refinement prompt.
+    review = make_review_output()
+    refine_prompt = build_refinement_prompt(review, ctx, "felt amazing, best session ever")
+    assert "felt amazing" in refine_prompt
+
+
+async def test_process_review_scores_are_isolated_from_description():
+    """A glowing description must not change the media-only scores, and the
+    refinement pass must be invoked with that description."""
+    user_id = uuid4()
+    ctx = {
+        "auth": FakeAuthRepo(),
+        "sessions": FakeSessionsRepo(),
+        "media": FakeMediaRepo(),
+        "reviews": FakeReviewRepo(),
+        "surfboards": FakeSurfboardRepo(),
+        "storage": FakeStorageClient(),
+        "frames": FakeFrameExtractor(frames=[b"frame-1", b"frame-2"]),
+        "gemini": FakeGeminiService(make_review_output()),
+        "arq": FakeArqPool(),
+    }
+    session = await ctx["sessions"].create(
+        profile_id=user_id,
+        session_date=date(2026, 4, 17),
+        location="Praia de Santos",
+        wave_size=2.0,
+        notes="Foi a melhor sessão da minha vida, mandei muito bem!",
+    )
+    await _seed_media(ctx, session.id, user_id)
+
+    service = _build_review_service(ctx)
+    pending = await ctx["reviews"].create_pending(session_id=session.id, profile_id=user_id)
+    review = await service.process_review(pending.id)
+
+    # The description drove exactly one refinement call...
+    assert len(ctx["gemini"].refine_calls) == 1
+    assert ctx["gemini"].refine_calls[0][2].startswith("Foi a melhor")
+    # ...and it never leaked into the scoring pass's context.
+    _, scoring_context = ctx["gemini"].calls[0]
+    assert not hasattr(scoring_context, "notes")
+
+    # Scores match the media-only output regardless of the glowing description.
+    expected = normalise_scores(make_review_output().scores)
+    assert review.score_flow == expected["flow"]
+    assert review.overall_score == expected["overall"]
+
+
+async def test_process_review_without_description_skips_refinement():
+    user_id = uuid4()
+    ctx = {
+        "auth": FakeAuthRepo(),
+        "sessions": FakeSessionsRepo(),
+        "media": FakeMediaRepo(),
+        "reviews": FakeReviewRepo(),
+        "surfboards": FakeSurfboardRepo(),
+        "storage": FakeStorageClient(),
+        "frames": FakeFrameExtractor(frames=[b"frame-1", b"frame-2"]),
+        "gemini": FakeGeminiService(make_review_output()),
+        "arq": FakeArqPool(),
+    }
+    session = await ctx["sessions"].create(
+        profile_id=user_id,
+        session_date=date(2026, 4, 17),
+        location="Praia de Santos",
+        wave_size=2.0,
+        notes=None,
+    )
+    await _seed_media(ctx, session.id, user_id)
+
+    service = _build_review_service(ctx)
+    pending = await ctx["reviews"].create_pending(session_id=session.id, profile_id=user_id)
+    await service.process_review(pending.id)
+
+    assert ctx["gemini"].refine_calls == []
