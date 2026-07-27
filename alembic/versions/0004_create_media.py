@@ -4,6 +4,7 @@ Revision ID: 0004_create_media
 Revises: 0003_create_sessions
 Create Date: 2026-04-17
 """
+
 from __future__ import annotations
 
 from alembic import op

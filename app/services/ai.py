@@ -62,7 +62,7 @@ class ModerationOutput(BaseModel):
 
 
 SYSTEM_PERSONA = (
-    "Você é um treinador de surf experiente com 20 anos de experiência analisando vídeos e fotos de surfe. "
+    "Você é um treinador de surf experiente com 20 anos de experiência analisando vídeos e fotos de surfe. "  # noqa: E501
     "Forneça feedback estruturado e acionável calibrado ao nível de habilidade do surfista. "
     "IMPORTANTE: avalie SOMENTE o que está visível nas mídias fornecidas. "
     "Se um aspecto técnico (ex: descida, manobra, uso dos braços) não aparecer nas imagens, "
@@ -73,15 +73,15 @@ OUTPUT_SCHEMA_INSTRUCTION = (
     "Retorne SOMENTE JSON válido (sem markdown, sem preâmbulo, sem comentários extras) "
     "seguindo este schema:\n"
     "{\n"
-    '  "narrative": string,                  // análise completa em prosa da performance do surfista\n'
+    '  "narrative": string,                  // análise completa em prosa da performance do surfista\n'  # noqa: E501
     '  "improvement_tips": [string, string, string],  // exatamente 3 dicas acionáveis\n'
     '  "scores": {\n'
     '    "flow": number | null,              // 0.0 – 10.0; null se o fluxo geral não for visível\n'
-    '    "drop": number | null,              // 0.0 – 10.0; null se a descida não aparecer na mídia\n'
+    '    "drop": number | null,              // 0.0 – 10.0; null se a descida não aparecer na mídia\n'  # noqa: E501
     '    "balance": number | null,           // 0.0 – 10.0; null se o equilíbrio não for visível\n'
-    '    "wave_selection": number | null,    // 0.0 – 10.0; null se a escolha da onda não for visível\n'
+    '    "wave_selection": number | null,    // 0.0 – 10.0; null se a escolha da onda não for visível\n'  # noqa: E501
     '    "maneuvers": number | null,         // 0.0 – 10.0; null se nenhuma manobra for visível\n'
-    '    "arms": number | null               // 0.0 – 10.0; null se o uso dos braços não for visível\n'
+    '    "arms": number | null               // 0.0 – 10.0; null se o uso dos braços não for visível\n'  # noqa: E501
     "  }\n"
     "}"
 )
@@ -90,7 +90,7 @@ OUTPUT_SCHEMA_INSTRUCTION = (
 MODERATION_PROMPT = (
     "You are a content moderation system for a surf coaching app. "
     "Analyse the provided image(s) and answer two questions: "
-    "1) Is this content related to surfing or water sports (surfing, bodyboarding, SUP, kitesurfing, ocean swimming)? "
+    "1) Is this content related to surfing or water sports (surfing, bodyboarding, SUP, kitesurfing, ocean swimming)? "  # noqa: E501
     "2) Does it contain explicit, adult, or offensive material?\n\n"
     "Return ONLY valid JSON (no markdown, no preamble):\n"
     '{"surf_related": boolean, "explicit_content": boolean, "reason": string}\n'
@@ -100,11 +100,7 @@ MODERATION_PROMPT = (
 
 def build_prompt(context: SurferContext) -> str:
     context_block = json.dumps(context.model_dump(), ensure_ascii=False, indent=2)
-    return (
-        f"{SYSTEM_PERSONA}\n\n"
-        f"Surfer context:\n{context_block}\n\n"
-        f"{OUTPUT_SCHEMA_INSTRUCTION}"
-    )
+    return f"{SYSTEM_PERSONA}\n\nSurfer context:\n{context_block}\n\n{OUTPUT_SCHEMA_INSTRUCTION}"
 
 
 def _strip_json_fences(text: str) -> str:
@@ -369,9 +365,7 @@ class ReviewService:
         if existing is not None and existing.status == "failed":
             await self.review_repo.delete(existing.id)
 
-        return await self.review_repo.create_pending(
-            session_id=session_id, profile_id=user.id
-        )
+        return await self.review_repo.create_pending(session_id=session_id, profile_id=user.id)
 
     async def process_review(self, review_id: UUID) -> Review:
         """Heavy processing — called by the arq worker, not from an HTTP handler."""
@@ -392,9 +386,7 @@ class ReviewService:
 
         all_frames: list[bytes] = []
         for item in media_items:
-            key = self._extract_key(
-                item.storage_url, review.profile_id, review.session_id, item.id
-            )
+            key = self._extract_key(item.storage_url, review.profile_id, review.session_id, item.id)
             if not key:
                 logger.warning("Could not derive storage key for media %s", item.id)
                 continue
@@ -426,16 +418,16 @@ class ReviewService:
             notes=session.notes,
         )
 
-        review_output = await asyncio.to_thread(
-            self.gemini.analyze_surf_media, all_frames, context
-        )
+        review_output = await asyncio.to_thread(self.gemini.analyze_surf_media, all_frames, context)
 
         if len(review_output.improvement_tips) != 3:
             tips = list(review_output.improvement_tips)
             if len(tips) > 3:
                 tips = tips[:3]
             while len(tips) < 3:
-                tips.append("Continue praticando e grave mais sessões para um feedback mais detalhado.")
+                tips.append(
+                    "Continue praticando e grave mais sessões para um feedback mais detalhado."
+                )
             review_output = ReviewOutput(
                 narrative=review_output.narrative,
                 improvement_tips=tips,
@@ -501,6 +493,7 @@ class ReviewService:
 # Training plan Pydantic I/O models
 # ---------------------------------------------------------------------------
 
+
 class TrainingContext(BaseModel):
     surf_level: str
     improvement_tips: list[str]
@@ -538,6 +531,7 @@ class TrainingPlanOutput(BaseModel):
 # TrainingService
 # ---------------------------------------------------------------------------
 
+
 class TrainingService:
     def __init__(
         self,
@@ -552,9 +546,7 @@ class TrainingService:
         self.gemini = gemini
         self.settings = get_settings()
 
-    async def enqueue_training_plan(
-        self, review_id: UUID, user: AuthUser
-    ) -> TrainingPlan:
+    async def enqueue_training_plan(self, review_id: UUID, user: AuthUser) -> TrainingPlan:
         """Validate inputs, create a pending plan row, and return it."""
         review = await self.review_repo.get(review_id)
         if review is None:
@@ -569,9 +561,7 @@ class TrainingService:
         if existing is not None and existing.status == "failed":
             await self.training_plan_repo.delete(existing.id)
 
-        return await self.training_plan_repo.create_pending(
-            review_id=review_id, profile_id=user.id
-        )
+        return await self.training_plan_repo.create_pending(review_id=review_id, profile_id=user.id)
 
     async def process_training_plan(self, plan_id: UUID) -> TrainingPlan:
         """Heavy processing — called by the arq worker."""
@@ -592,8 +582,14 @@ class TrainingService:
             improvement_tips=list(review.improvement_tips or []),
             score_flow=float(review.score_flow) if review.score_flow is not None else None,
             score_balance=float(review.score_balance) if review.score_balance is not None else None,
-            score_maneuvers=float(review.score_maneuvers) if review.score_maneuvers is not None else None,
-            score_wave_selection=float(review.score_wave_selection) if review.score_wave_selection is not None else None,
+            score_maneuvers=(
+                float(review.score_maneuvers) if review.score_maneuvers is not None else None
+            ),
+            score_wave_selection=(
+                float(review.score_wave_selection)
+                if review.score_wave_selection is not None
+                else None
+            ),
             score_drop=float(review.score_drop) if review.score_drop is not None else None,
             score_arms=float(review.score_arms) if review.score_arms is not None else None,
             overall_score=float(review.overall_score) if review.overall_score is not None else None,
@@ -628,9 +624,7 @@ class TrainingService:
             workouts=workouts_data,
         )
 
-    async def retry_training_plan(
-        self, plan_id: UUID, user: AuthUser
-    ) -> TrainingPlan:
+    async def retry_training_plan(self, plan_id: UUID, user: AuthUser) -> TrainingPlan:
         """Reset a failed plan to processing. Caller enqueues the worker job."""
         plan = await self.training_plan_repo.get_by_id(plan_id)
         if plan is None:

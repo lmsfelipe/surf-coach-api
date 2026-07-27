@@ -55,9 +55,7 @@ class VideoTranscoder:
             )
             _, stderr = await proc.communicate()
             if proc.returncode != 0:
-                raise InvalidMediaError(
-                    f"ffmpeg exited {proc.returncode}: {stderr.decode()[:300]}"
-                )
+                raise InvalidMediaError(f"ffmpeg exited {proc.returncode}: {stderr.decode()[:300]}")
 
             with open(out_path, "rb") as f:
                 return f.read()

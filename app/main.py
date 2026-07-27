@@ -1,3 +1,6 @@
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+
 import sentry_sdk
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,10 +12,21 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api import ai, auth, health, media, reviews, sessions, surfboards
 from app.core.config import get_settings
+from app.core.db import engine
+from app.core.deps import close_arq_pool
 from app.core.errors import register_exception_handlers
 from app.core.logging import setup_logging
-from app.core.middleware import RequestContextMiddleware
+from app.core.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+    yield
+    # Release the shared Redis pool and DB connection pool so shutdown is clean
+    # and connections are not left dangling against Supabase/Redis.
+    await close_arq_pool()
+    await engine.dispose()
 
 
 def create_app() -> FastAPI:
@@ -32,6 +46,7 @@ def create_app() -> FastAPI:
         title="Surf Coach API",
         version="0.1.0",
         description="Surf Coaching Platform — Phase 1 (auth + profile).",
+        lifespan=lifespan,
     )
 
     # In prod, restrict Host headers to the configured allow-list; fall back to
@@ -66,6 +81,11 @@ def create_app() -> FastAPI:
     app.state.limiter = limiter
     app.add_exception_handler(RateLimitExceeded, rate_limit_exceeded_handler)
     app.add_middleware(SlowAPIMiddleware)
+
+    # Added last, so it sits just inside RequestContextMiddleware: rejections are
+    # still logged with a request id, but the cap is applied before the body
+    # reaches the multipart parser.
+    app.add_middleware(BodySizeLimitMiddleware)
 
     app.add_middleware(RequestContextMiddleware)
 

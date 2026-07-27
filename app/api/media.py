@@ -1,17 +1,18 @@
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
-from fastapi.responses import Response
+from fastapi.responses import StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.deps import db_session, get_current_user
-from app.core.rate_limit import limiter
 from app.core.errors import NotFoundError
 from app.core.frame_extractor import FrameExtractor
+from app.core.rate_limit import limiter
 from app.core.security.jwt import AuthUser
 from app.core.security.media_token import mint_media_token, verify_media_token
 from app.core.storage import StorageClient, get_storage_client
+from app.core.upload import SpooledUpload, spool_upload
 from app.models.media import Media
 from app.repositories.media import MediaRepository
 from app.repositories.sessions import SessionsRepository
@@ -43,6 +44,7 @@ def get_media_service(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _media_to_out(media: Media, profile_id: UUID) -> MediaOut:
     """Convert a Media ORM model to MediaOut with a signed contentUrl."""
@@ -88,20 +90,27 @@ async def upload_media(
     user: AuthUser = Depends(get_current_user),
     service: MediaService = Depends(get_media_service),
 ) -> list[MediaOut]:
-    files_data = [(await f.read(), f.filename or "upload") for f in file]
+    # Part count first: it is the only check that costs nothing. The total body
+    # size is already capped by BodySizeLimitMiddleware, which runs before the
+    # multipart parser touches the stream.
+    service.validate_file_count(len(file))
 
-    service.validate_upload_counts([data for data, _ in files_data])
+    max_bytes = get_settings().MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    uploads: list[SpooledUpload] = []
+    try:
+        for part in file:
+            uploads.append(await spool_upload(part, max_bytes))
 
-    results = []
-    for data, filename in files_data:
-        media = await service.upload(
-            session_id=session_id,
-            file_bytes=data,
-            file_name=filename,
-            user=user,
-        )
-        results.append(_media_to_out(media, user.id))
-    return results
+        service.validate_upload_counts([u.head() for u in uploads])
+
+        results = []
+        for upload in uploads:
+            media = await service.upload(session_id=session_id, upload=upload, user=user)
+            results.append(_media_to_out(media, user.id))
+        return results
+    finally:
+        for upload in uploads:
+            upload.close()
 
 
 @router.get(
@@ -153,11 +162,14 @@ async def stream_media_content(
     token: str = Query(...),
     service: MediaService = Depends(get_media_service),
     storage: StorageClient = Depends(get_storage_client),
-) -> Response:
+) -> StreamingResponse:
     """Stream media bytes from private storage.
 
     Authorised via a short-lived signed token (see §4.1 of the media proxy spec).
     Supports HTTP Range requests for video seeking.
+
+    Bytes are relayed straight from storage to the client, so a range-less
+    request for a full video costs a chunk of memory rather than the whole file.
     """
     # 1. Validate token → get profile_id
     profile_id = verify_media_token(token, media_id)
@@ -165,23 +177,31 @@ async def stream_media_content(
     # 2. Look up media and verify ownership
     media = await service.get_media_for_profile(media_id, profile_id)
 
-    # 3. Extract storage key and download (with Range support)
+    # 3. Extract storage key and open the upstream body (with Range support)
     key = _storage_key_from_url(media.storage_url)
     range_header = request.headers.get("range")
-    result = await storage.download_range(key, range_header)
+    stream = await storage.stream_range(key, range_header)
 
-    # 5. Build response
+    # 4. Build response
     headers = {
         "Accept-Ranges": "bytes",
-        "Content-Length": str(result.content_length),
         "Cache-Control": "private, max-age=3600",
     }
-    if result.content_range:
-        headers["Content-Range"] = result.content_range
+    if stream.content_length is not None:
+        headers["Content-Length"] = str(stream.content_length)
+    if stream.content_range:
+        headers["Content-Range"] = stream.content_range
 
-    return Response(
-        content=result.content,
-        status_code=result.status_code,
-        media_type=result.content_type,
+    async def _body():
+        try:
+            async for chunk in stream.aiter_bytes():
+                yield chunk
+        finally:
+            await stream.aclose()
+
+    return StreamingResponse(
+        _body(),
+        status_code=stream.status_code,
+        media_type=stream.content_type,
         headers=headers,
     )

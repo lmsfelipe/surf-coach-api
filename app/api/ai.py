@@ -8,10 +8,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.config import get_settings
 from app.core.deps import db_session, get_arq_pool, get_current_user
 from app.core.rate_limit import limiter
-
-logger = structlog.get_logger(__name__)
-
-ENQUEUE_FAILED_MESSAGE = "Processing could not be started. Please try again."
 from app.core.security.jwt import AuthUser
 from app.repositories.ai import ReviewRepository, TrainingPlanRepository
 from app.repositories.auth import AuthRepository
@@ -22,6 +18,10 @@ from app.schemas.training import (
     WorkoutResponse,
 )
 from app.services.ai import GeminiService, TrainingService
+
+logger = structlog.get_logger(__name__)
+
+ENQUEUE_FAILED_MESSAGE = "Processing could not be started. Please try again."
 
 router = APIRouter(prefix="/api/v1", tags=["training"])
 

@@ -1,4 +1,5 @@
 """Tests for video optimization (transcode + sweep)."""
+
 from __future__ import annotations
 
 import datetime
@@ -15,6 +16,7 @@ from tests.fake_deps import FakeMediaRepo, FakeStorageClient, FakeVideoTranscode
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_video_media(repo: FakeMediaRepo, *, session_id=None, optimized_at=None, raw=b"raw-video"):
     """Insert a fake video media row and return it + the storage key."""
@@ -55,6 +57,7 @@ async def _make_video_media_async(repo, *, session_id=None, optimized_at=None, r
 # _key_from_storage_url
 # ---------------------------------------------------------------------------
 
+
 class TestKeyFromStorageUrl:
     def test_extracts_key(self):
         url = "https://x.supabase.co/storage/v1/object/public/surf-media/uid/sid/mid.mov"
@@ -72,6 +75,7 @@ class TestKeyFromStorageUrl:
 # ---------------------------------------------------------------------------
 # optimize_media_task
 # ---------------------------------------------------------------------------
+
 
 class TestOptimizeMediaTask:
     @pytest.fixture()
@@ -204,6 +208,7 @@ class TestOptimizeMediaTask:
 # sweep_unoptimized_media
 # ---------------------------------------------------------------------------
 
+
 class TestSweepUnoptimizedMedia:
     async def test_enqueues_unoptimized_videos(self, monkeypatch):
         media_repo = FakeMediaRepo()
@@ -252,6 +257,7 @@ class TestSweepUnoptimizedMedia:
 # FakeMediaRepo — optimization helpers
 # ---------------------------------------------------------------------------
 
+
 class TestFakeMediaRepoOptimization:
     async def test_mark_optimized_sets_fields(self):
         repo = FakeMediaRepo()
@@ -270,9 +276,12 @@ class TestFakeMediaRepoOptimization:
             repo, optimized_at=datetime.datetime.now(tz=datetime.UTC)
         )
         await repo.create(
-            session_id=uuid4(), media_type="image",
-            storage_url="x", file_name="p.jpg",
-            file_size_bytes=1, duration_seconds=None,
+            session_id=uuid4(),
+            media_type="image",
+            storage_url="x",
+            file_name="p.jpg",
+            file_size_bytes=1,
+            duration_seconds=None,
         )
 
         rows = await repo.list_unoptimized_videos(older_than_sec=0, limit=100)

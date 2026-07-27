@@ -5,8 +5,9 @@ Revises: 0011_async_processing
 Create Date: 2026-07-17
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0012_processing_started_at"
 down_revision = "0011_async_processing"

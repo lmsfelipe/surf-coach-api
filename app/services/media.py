@@ -1,3 +1,4 @@
+import asyncio
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -13,6 +14,7 @@ from app.core.errors import (
     MediaNotSurfRelatedError,
     NotFoundError,
     TooFewPhotosError,
+    TooManyFilesError,
     TooManyPhotosError,
     TooManyVideosError,
     VideoTooLongError,
@@ -20,6 +22,7 @@ from app.core.errors import (
 from app.core.frame_extractor import FrameExtractor
 from app.core.security.jwt import AuthUser
 from app.core.storage import StorageClient
+from app.core.upload import SpooledUpload
 from app.models.media import Media
 from app.repositories.media import MediaRepository
 from app.repositories.sessions import SessionsRepository
@@ -61,14 +64,25 @@ class MediaService:
         self.gemini = gemini
         self.settings = get_settings()
 
-    def validate_upload_counts(self, files_bytes: list[bytes]) -> None:
-        """Validate photo/video count limits for a batch upload."""
-        photo_count = sum(
-            1 for data in files_bytes if magic.from_buffer(data, mime=True) in IMAGE_MIME_TYPES
-        )
-        video_count = sum(
-            1 for data in files_bytes if magic.from_buffer(data, mime=True) in VIDEO_MIME_TYPES
-        )
+    def validate_file_count(self, count: int) -> None:
+        """Cap the number of parts in one request, whatever their type.
+
+        The photo/video limits below only constrain parts we recognise, so
+        without this a batch of arbitrary-type parts is bounded by nothing.
+        """
+        max_files = self.settings.MAX_UPLOAD_FILES
+        if count > max_files:
+            raise TooManyFilesError(details={"max_files": max_files, "uploaded": count})
+
+    def validate_upload_counts(self, file_heads: list[bytes]) -> None:
+        """Validate photo/video count limits for a batch upload.
+
+        Takes the leading bytes of each part — libmagic only ever looks at the
+        header, so there is no reason to hand it whole files.
+        """
+        detected = [magic.from_buffer(head, mime=True) for head in file_heads]
+        photo_count = sum(1 for mime in detected if mime in IMAGE_MIME_TYPES)
+        video_count = sum(1 for mime in detected if mime in VIDEO_MIME_TYPES)
 
         if 0 < photo_count < MIN_PHOTOS:
             raise TooFewPhotosError(
@@ -86,24 +100,29 @@ class MediaService:
     async def upload(
         self,
         session_id: UUID,
-        file_bytes: bytes,
-        file_name: str,
+        upload: SpooledUpload,
         user: AuthUser,
     ) -> Media:
+        """Validate, moderate and store one already-spooled upload.
+
+        Every expensive step here is synchronous — OpenCV decodes, the Gemini
+        round-trip, the Supabase PUT — so each runs on a worker thread. The API
+        process serves all traffic on a single event loop; leaving any of these
+        inline stalls every other request, health checks included.
+        """
         session = await self.sessions_repo.get(session_id)
         if session is None:
             raise NotFoundError("Session not found.")
         if session.profile_id != user.id:
             raise ForbiddenError()
 
-        size = len(file_bytes)
         max_bytes = self.settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
-        if size > max_bytes:
+        if upload.size > max_bytes:
             raise FileTooLargeError(
                 details={"max_size_mb": self.settings.MAX_UPLOAD_SIZE_MB},
             )
 
-        detected_mime = magic.from_buffer(file_bytes, mime=True)
+        detected_mime = magic.from_buffer(upload.head(), mime=True)
         if detected_mime not in IMAGE_MIME_TYPES and detected_mime not in VIDEO_MIME_TYPES:
             raise InvalidMediaTypeError(
                 details={"detected": detected_mime, "accepted": ACCEPTED_MIME_TYPES},
@@ -112,27 +131,31 @@ class MediaService:
         media_type = "image" if detected_mime in IMAGE_MIME_TYPES else "video"
         duration_seconds: Decimal | None = None
         if media_type == "video":
-            duration = self.frame_extractor.probe_duration(file_bytes)
+            duration = await asyncio.to_thread(
+                self.frame_extractor.probe_duration_path, upload.path
+            )
             if duration > self.settings.MAX_VIDEO_DURATION_SEC:
                 raise VideoTooLongError(
                     details={"max_seconds": self.settings.MAX_VIDEO_DURATION_SEC},
                 )
             duration_seconds = Decimal(f"{duration:.2f}")
 
-        self._moderate(file_bytes, media_type, detected_mime)
+        await self._moderate(upload, media_type, detected_mime)
 
         media_id = uuid4()
         ext = MIME_EXT.get(detected_mime, "bin")
         storage_key = f"{user.id}/{session_id}/{media_id}.{ext}"
 
-        storage_url = self.storage.upload(storage_key, file_bytes, detected_mime)
+        storage_url = await asyncio.to_thread(
+            self.storage.upload_file, storage_key, upload.path, detected_mime
+        )
 
         media = await self.media_repo.create(
             session_id=session_id,
             media_type=media_type,
             storage_url=storage_url,
-            file_name=file_name,
-            file_size_bytes=size,
+            file_name=upload.file_name,
+            file_size_bytes=upload.size,
             duration_seconds=duration_seconds,
         )
         return media
@@ -168,10 +191,10 @@ class MediaService:
         media = await self.get_media(media_id, user)
         key = self._extract_storage_key(media.storage_url, user.id, media.session_id, media.id)
         if key:
-            self.storage.delete(key)
+            await asyncio.to_thread(self.storage.delete, key)
         await self.media_repo.delete(media)
 
-    def _moderate(self, file_bytes: bytes, media_type: str, mime_type: str) -> None:
+    async def _moderate(self, upload: SpooledUpload, media_type: str, mime_type: str) -> None:
         if not self.settings.CONTENT_MODERATION_ENABLED:
             return
         if self.gemini is None:
@@ -179,13 +202,17 @@ class MediaService:
             return
 
         if media_type == "image":
-            images = [file_bytes]
+            # Gemini takes bytes, so an image is read in full here — one file at
+            # a time, rather than the whole batch as before.
+            images = [await asyncio.to_thread(upload.read_all)]
             moderation_mime = mime_type
         else:
-            images = self.frame_extractor.extract(file_bytes, frame_count=3)
+            images = await asyncio.to_thread(self.frame_extractor.extract_path, upload.path, 3)
             moderation_mime = "image/jpeg"
 
-        result = self.gemini.moderate_media_content(images, mime_type=moderation_mime)
+        result = await asyncio.to_thread(
+            self.gemini.moderate_media_content, images, moderation_mime
+        )
 
         if result.explicit_content:
             raise ExplicitContentError(details={"reason": result.reason})

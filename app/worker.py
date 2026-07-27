@@ -40,6 +40,8 @@ def _key_from_storage_url(url: str, bucket: str) -> str | None:
     if idx < 0:
         return None
     return url[idx + len(marker) :].split("?", 1)[0]
+
+
 SWEEP_MESSAGE = "Processing was interrupted."
 
 
@@ -148,9 +150,7 @@ async def sweep_stuck_jobs(ctx: dict) -> None:
                 {"msg": SWEEP_MESSAGE, "threshold": threshold},
             )
             if result.rowcount:
-                logger.warning(
-                    "Sweeper: marked %d stuck %s as failed", result.rowcount, table
-                )
+                logger.warning("Sweeper: marked %d stuck %s as failed", result.rowcount, table)
         await db.commit()
     finally:
         await db.close()

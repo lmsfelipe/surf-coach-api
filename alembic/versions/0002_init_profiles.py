@@ -4,6 +4,7 @@ Revision ID: 0002_init_profiles
 Revises: 0001_dev_auth_users_shim
 Create Date: 2026-04-16
 """
+
 from __future__ import annotations
 
 from alembic import op

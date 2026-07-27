@@ -29,9 +29,7 @@ class TrainingPlan(Base):
         ForeignKey("public.profiles.id", ondelete="CASCADE"),
         nullable=False,
     )
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default="completed"
-    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="completed")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     generated_by: Mapped[str] = mapped_column(String, nullable=False, server_default="ai")
     ai_model_version: Mapped[str | None] = mapped_column(String, nullable=True)

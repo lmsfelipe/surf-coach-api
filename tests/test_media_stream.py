@@ -1,7 +1,7 @@
 """Tests for GET /api/v1/media/{media_id}/content — media proxy / streaming."""
 
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -61,7 +61,7 @@ def _token(user_id: UUID, email: str = "surfer@example.com") -> str:
         "sub": str(user_id),
         "email": email,
         "aud": "authenticated",
-        "exp": datetime.now(tz=timezone.utc) + timedelta(hours=1),
+        "exp": datetime.now(tz=UTC) + timedelta(hours=1),
     }
     return jwt.encode(payload, settings.SUPABASE_JWT_SECRET, algorithm="HS256")
 
@@ -86,13 +86,18 @@ async def _create_session(c: AsyncClient, user_id: UUID) -> str:
 
 
 async def _upload_image(c: AsyncClient, user_id: UUID, session_id: str) -> dict:
+    """Upload the minimum photo batch (3) and return the first MediaOut."""
     headers = {"Authorization": f"Bearer {_token(user_id)}"}
-    with open(JPEG_PATH, "rb") as f:
-        r = await c.post(
-            f"/api/v1/sessions/{session_id}/media/",
-            headers=headers,
-            files={"file": ("surf.jpg", f, "image/jpeg")},
-        )
+    image_bytes = JPEG_PATH.read_bytes()
+    r = await c.post(
+        f"/api/v1/sessions/{session_id}/media/",
+        headers=headers,
+        files=[
+            ("file", ("surf.jpg", image_bytes, "image/jpeg")),
+            ("file", ("surf2.jpg", image_bytes, "image/jpeg")),
+            ("file", ("surf3.jpg", image_bytes, "image/jpeg")),
+        ],
+    )
     assert r.status_code == 201
     return r.json()[0]
 
@@ -132,6 +137,30 @@ async def test_stream_returns_206_with_range(client):
     assert len(r.content) == 100
 
 
+async def test_streamed_bytes_match_the_stored_object(client):
+    """Streaming relays the object unchanged, for both a full and a partial read."""
+    pytest.importorskip("magic")
+    user_id = uuid4()
+    original = JPEG_PATH.read_bytes()
+    async with client as c:
+        session_id = await _create_session(c, user_id)
+        body = await _upload_image(c, user_id, session_id)
+        content_url = body["contentUrl"]
+
+        full = await c.get(content_url)
+        partial = await c.get(content_url, headers={"Range": "bytes=10-509"})
+
+    assert full.status_code == 200
+    assert full.content == original
+    assert full.headers["content-length"] == str(len(original))
+    assert "content-range" not in full.headers
+
+    assert partial.status_code == 206
+    assert partial.content == original[10:510]
+    assert partial.headers["content-length"] == "500"
+    assert partial.headers["content-range"] == f"bytes 10-509/{len(original)}"
+
+
 # ---- Auth / token error cases --------------------------------------------
 
 
@@ -168,7 +197,9 @@ async def test_stream_expired_token_returns_401(client):
             "exp": int(time.time()) - 1800,
         }
         expired_token = jwt.encode(
-            expired_payload, settings.SUPABASE_JWT_SECRET, algorithm="HS256",
+            expired_payload,
+            settings.SUPABASE_JWT_SECRET,
+            algorithm="HS256",
         )
         r = await c.get(f"/api/v1/media/{media_id}/content?token={expired_token}")
 

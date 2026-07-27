@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID, uuid4
 
@@ -21,7 +21,6 @@ from tests.fake_deps import (
     make_moderation_output,
     make_review_output,
 )
-
 
 FIXTURES = Path(__file__).parent / "fixtures"
 JPEG_PATH = FIXTURES / "surf_sample.jpg"
@@ -58,7 +57,7 @@ def _token(user_id: UUID, email: str = "surfer@example.com") -> str:
         "sub": str(user_id),
         "email": email,
         "aud": "authenticated",
-        "exp": datetime.now(tz=timezone.utc) + timedelta(hours=1),
+        "exp": datetime.now(tz=UTC) + timedelta(hours=1),
     }
     return jwt.encode(payload, settings.SUPABASE_JWT_SECRET, algorithm="HS256")
 
@@ -86,15 +85,20 @@ async def test_upload_image_returns_201_and_storage_url(client):
     pytest.importorskip("magic")
     user_id = uuid4()
     headers = {"Authorization": f"Bearer {_token(user_id)}"}
+    image_bytes = JPEG_PATH.read_bytes()
     async with client as c:
         session_id = await _create_session(c, user_id)
-        with open(JPEG_PATH, "rb") as f:
-            r = await c.post(
-                f"/api/v1/sessions/{session_id}/media/",
-                headers=headers,
-                files={"file": ("surf.jpg", f, "image/jpeg")},
-            )
+        r = await c.post(
+            f"/api/v1/sessions/{session_id}/media/",
+            headers=headers,
+            files=[
+                ("file", ("surf.jpg", image_bytes, "image/jpeg")),
+                ("file", ("surf2.jpg", image_bytes, "image/jpeg")),
+                ("file", ("surf3.jpg", image_bytes, "image/jpeg")),
+            ],
+        )
     assert r.status_code == 201
+    assert len(r.json()) == 3
     body = r.json()[0]
     assert body["mediaType"] == "image"
     assert "contentUrl" in body
@@ -124,14 +128,18 @@ async def test_upload_forbidden_for_other_user(client):
     pytest.importorskip("magic")
     user_a = uuid4()
     user_b = uuid4()
+    image_bytes = JPEG_PATH.read_bytes()
     async with client as c:
         session_id = await _create_session(c, user_a)
-        with open(JPEG_PATH, "rb") as f:
-            r = await c.post(
-                f"/api/v1/sessions/{session_id}/media/",
-                headers={"Authorization": f"Bearer {_token(user_b)}"},
-                files={"file": ("surf.jpg", f, "image/jpeg")},
-            )
+        r = await c.post(
+            f"/api/v1/sessions/{session_id}/media/",
+            headers={"Authorization": f"Bearer {_token(user_b)}"},
+            files=[
+                ("file", ("surf.jpg", image_bytes, "image/jpeg")),
+                ("file", ("surf2.jpg", image_bytes, "image/jpeg")),
+                ("file", ("surf3.jpg", image_bytes, "image/jpeg")),
+            ],
+        )
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "FORBIDDEN"
 

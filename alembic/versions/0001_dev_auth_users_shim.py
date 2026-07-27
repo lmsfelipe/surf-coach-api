@@ -8,10 +8,10 @@ Stands in for Supabase's managed `auth.users` when running against a plain
 Postgres container locally. Gated on APP_ENV=development so production never
 touches the real Supabase-owned schema.
 """
+
 from __future__ import annotations
 
 from alembic import op
-
 from app.core.config import get_settings
 
 revision = "0001_dev_auth_users_shim"

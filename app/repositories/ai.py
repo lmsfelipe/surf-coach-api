@@ -50,9 +50,7 @@ class ReviewRepository:
         await self.db.refresh(review)
         return review
 
-    async def create_pending(
-        self, *, session_id: UUID, profile_id: UUID
-    ) -> Review:
+    async def create_pending(self, *, session_id: UUID, profile_id: UUID) -> Review:
         review = Review(
             session_id=session_id,
             profile_id=profile_id,
@@ -141,9 +139,7 @@ class TrainingPlanRepository:
         )
 
     async def get_by_id(self, plan_id: UUID) -> TrainingPlan | None:
-        result = await self.db.execute(
-            self._eager_query().where(TrainingPlan.id == plan_id)
-        )
+        result = await self.db.execute(self._eager_query().where(TrainingPlan.id == plan_id))
         return result.scalar_one_or_none()
 
     async def get_by_review_id(self, review_id: UUID) -> TrainingPlan | None:
@@ -162,9 +158,7 @@ class TrainingPlanRepository:
 
     async def get_workout_by_id(self, workout_id: UUID) -> Workout | None:
         result = await self.db.execute(
-            select(Workout)
-            .options(selectinload(Workout.exercises))
-            .where(Workout.id == workout_id)
+            select(Workout).options(selectinload(Workout.exercises)).where(Workout.id == workout_id)
         )
         return result.scalar_one_or_none()
 
@@ -174,9 +168,7 @@ class TrainingPlanRepository:
             await self.db.delete(plan)
             await self.db.commit()
 
-    async def create_pending(
-        self, *, review_id: UUID, profile_id: UUID
-    ) -> TrainingPlan:
+    async def create_pending(self, *, review_id: UUID, profile_id: UUID) -> TrainingPlan:
         plan = TrainingPlan(
             review_id=review_id,
             profile_id=profile_id,
@@ -186,8 +178,9 @@ class TrainingPlanRepository:
         )
         self.db.add(plan)
         await self.db.commit()
-        await self.db.refresh(plan)
-        return plan
+        plan_with_relations = await self.get_by_id(plan.id)
+        assert plan_with_relations is not None
+        return plan_with_relations
 
     async def mark_completed(
         self,
@@ -235,8 +228,9 @@ class TrainingPlanRepository:
         plan.status = "failed"
         plan.error_message = error_message
         await self.db.commit()
-        await self.db.refresh(plan)
-        return plan
+        plan_with_relations = await self.get_by_id(plan.id)
+        assert plan_with_relations is not None
+        return plan_with_relations
 
     async def reset_for_retry(self, plan_id: UUID) -> TrainingPlan:
         plan = await self.get_by_id(plan_id)
@@ -245,8 +239,9 @@ class TrainingPlanRepository:
         plan.error_message = None
         plan.processing_started_at = func.now()
         await self.db.commit()
-        await self.db.refresh(plan)
-        return plan
+        plan_with_relations = await self.get_by_id(plan.id)
+        assert plan_with_relations is not None
+        return plan_with_relations
 
     async def create(
         self,

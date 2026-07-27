@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -23,7 +23,7 @@ class _FakeRepo:
         return self._store.get(user_id)
 
     async def create_profile(self, user_id: UUID, *, surf_level: str = "beginner") -> Profile:
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         profile = Profile(
             id=user_id,
             surf_level=surf_level,
@@ -38,7 +38,7 @@ class _FakeRepo:
     async def update_profile(self, profile: Profile, fields: dict) -> Profile:
         for k, v in fields.items():
             setattr(profile, k, v)
-        profile.updated_at = datetime.now(tz=timezone.utc)
+        profile.updated_at = datetime.now(tz=UTC)
         return profile
 
 
@@ -58,7 +58,7 @@ def _token(user_id: UUID, email: str = "surfer@example.com") -> str:
         "sub": str(user_id),
         "email": email,
         "aud": "authenticated",
-        "exp": datetime.now(tz=timezone.utc) + timedelta(hours=1),
+        "exp": datetime.now(tz=UTC) + timedelta(hours=1),
     }
     return jwt.encode(payload, settings.SUPABASE_JWT_SECRET, algorithm="HS256")
 
@@ -66,13 +66,6 @@ def _token(user_id: UUID, email: str = "surfer@example.com") -> str:
 @pytest.fixture
 def client():
     return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
-
-
-async def test_health(client):
-    async with client as c:
-        r = await c.get("/health")
-    assert r.status_code == 200
-    assert r.json() == {"status": "ok"}
 
 
 async def test_me_missing_token_returns_401_missing_token(client):

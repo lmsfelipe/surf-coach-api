@@ -112,6 +112,103 @@ async def test_rate_limit_disabled_allows_all(client):
 
 
 @pytest.mark.usefixtures("_enable_rate_limit")
+async def test_default_limit_applies_to_undecorated_routes(client, monkeypatch):
+    """Routes without an explicit @limiter.limit still get RATE_LIMIT_DEFAULT."""
+    monkeypatch.setenv("RATE_LIMIT_DEFAULT", "3/minute")
+    get_settings.cache_clear()
+    limiter.reset()
+    token, _ = _token()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        async with client as c:
+            for _ in range(3):
+                r = await c.get("/api/v1/sessions/", headers=headers)
+                assert r.status_code != 429
+
+            r = await c.get("/api/v1/sessions/", headers=headers)
+            assert r.status_code == 429
+            assert r.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("_enable_rate_limit")
+async def test_health_endpoints_are_exempt_from_default_limit(client, monkeypatch):
+    """A throttled health check would read as an outage — they must never 429."""
+    monkeypatch.setenv("RATE_LIMIT_DEFAULT", "2/minute")
+    get_settings.cache_clear()
+    limiter.reset()
+
+    try:
+        async with client as c:
+            for _ in range(10):
+                assert (await c.get("/health/live")).status_code == 200
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("_enable_rate_limit")
+async def test_decorated_route_limit_stacks_with_default(client, monkeypatch):
+    """Explicit route limits stack with the default; the stricter one governs.
+
+    Because this project passes *callable* limit values, slowapi registers them
+    in ``_dynamic_route_limits`` rather than ``_route_limits`` — and the
+    middleware's exempt check only consults the latter. So the default limit is
+    evaluated on these routes too. That is safe as long as RATE_LIMIT_DEFAULT
+    stays looser than every per-route limit.
+    """
+    monkeypatch.setenv("RATE_LIMIT_DEFAULT", "1000/minute")
+    get_settings.cache_clear()
+    limiter.reset()
+    token, _ = _token()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        async with client as c:
+            # A loose default leaves the 5/hour AI limit in charge.
+            for _ in range(5):
+                r = await c.post(
+                    "/api/v1/reviews/",
+                    headers=headers,
+                    json={"sessionId": str(uuid4())},
+                )
+                assert r.status_code != 429
+
+            r = await c.post(
+                "/api/v1/reviews/",
+                headers=headers,
+                json={"sessionId": str(uuid4())},
+            )
+            assert r.status_code == 429
+            assert r.json()["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("_enable_rate_limit")
+async def test_default_limit_429_uses_error_envelope(client, monkeypatch):
+    """A 429 raised by the middleware must use the same envelope as the decorator path."""
+    monkeypatch.setenv("RATE_LIMIT_DEFAULT", "1/minute")
+    get_settings.cache_clear()
+    limiter.reset()
+    token, _ = _token()
+    headers = {"Authorization": f"Bearer {token}"}
+
+    try:
+        async with client as c:
+            await c.get("/api/v1/sessions/", headers=headers)
+            r = await c.get("/api/v1/sessions/", headers=headers)
+
+        assert r.status_code == 429
+        body = r.json()
+        assert body["error"]["code"] == "RATE_LIMIT_EXCEEDED"
+        assert body["error"]["message"] == "Too many requests. Please try again later."
+    finally:
+        get_settings.cache_clear()
+
+
+@pytest.mark.usefixtures("_enable_rate_limit")
 async def test_rate_limit_per_user_isolation(client):
     """Different users have independent rate limit counters."""
     user_a = uuid4()

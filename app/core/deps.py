@@ -21,6 +21,14 @@ async def get_arq_pool() -> ArqRedis:
     return _arq_pool
 
 
+async def close_arq_pool() -> None:
+    """Release the shared arq pool on shutdown."""
+    global _arq_pool
+    if _arq_pool is not None:
+        await _arq_pool.aclose()
+        _arq_pool = None
+
+
 async def get_current_user(
     authorization: str | None = Header(default=None),
 ) -> AuthUser:

@@ -4,6 +4,7 @@ Revision ID: 0003_create_sessions
 Revises: 05c9449a6d9d
 Create Date: 2026-04-17
 """
+
 from __future__ import annotations
 
 from alembic import op

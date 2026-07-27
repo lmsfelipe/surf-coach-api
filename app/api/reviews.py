@@ -7,12 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
 from app.core.deps import db_session, get_arq_pool, get_current_user
-from app.core.rate_limit import limiter
-
-logger = structlog.get_logger(__name__)
-
-ENQUEUE_FAILED_MESSAGE = "Processing could not be started. Please try again."
 from app.core.frame_extractor import FrameExtractor
+from app.core.rate_limit import limiter
 from app.core.security.jwt import AuthUser
 from app.core.storage import StorageClient, get_storage_client
 from app.repositories.ai import ReviewRepository
@@ -22,6 +18,10 @@ from app.repositories.sessions import SessionsRepository
 from app.repositories.surfboards import SurfboardRepository
 from app.schemas.reviews import ReviewCreate, ReviewOut
 from app.services.ai import GeminiService, ReviewService
+
+logger = structlog.get_logger(__name__)
+
+ENQUEUE_FAILED_MESSAGE = "Processing could not be started. Please try again."
 
 router = APIRouter(prefix="/api/v1", tags=["reviews"])
 

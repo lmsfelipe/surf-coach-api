@@ -4,6 +4,7 @@ Revision ID: 0010_sessions_wave_board
 Revises: 0009_extend_profiles_and_add_surfboards
 Create Date: 2026-05-04
 """
+
 from __future__ import annotations
 
 from alembic import op

@@ -4,6 +4,7 @@ Revision ID: 0008_create_exercises
 Revises: 0007_create_training_plans_and_workouts
 Create Date: 2026-04-24
 """
+
 from __future__ import annotations
 
 from alembic import op

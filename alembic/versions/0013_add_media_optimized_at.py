@@ -5,8 +5,9 @@ Revises: 0012_processing_started_at
 Create Date: 2026-07-21
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0013_media_optimized_at"
 down_revision = "0012_processing_started_at"

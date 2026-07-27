@@ -1,7 +1,9 @@
 """In-memory fakes used across Phase 2 tests."""
+
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import time
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -25,7 +27,7 @@ class FakeAuthRepo:
         return self._profiles.get(user_id)
 
     async def create_profile(self, user_id: UUID, *, surf_level: str = "beginner") -> Profile:
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         p = Profile(
             id=user_id,
             surf_level=surf_level,
@@ -40,7 +42,7 @@ class FakeAuthRepo:
     async def update_profile(self, profile: Profile, fields: dict) -> Profile:
         for k, v in fields.items():
             setattr(profile, k, v)
-        profile.updated_at = datetime.now(tz=timezone.utc)
+        profile.updated_at = datetime.now(tz=UTC)
         return profile
 
 
@@ -49,7 +51,7 @@ class FakeSessionsRepo:
         self._store: dict[UUID, Session] = {}
 
     async def create(self, **kwargs) -> Session:
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         session = Session(
             id=uuid4(),
             profile_id=kwargs["profile_id"],
@@ -81,7 +83,7 @@ class FakeMediaRepo:
         self._store: dict[UUID, Media] = {}
 
     async def create(self, **kwargs) -> Media:
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         media = Media(
             id=uuid4(),
             session_id=kwargs["session_id"],
@@ -104,20 +106,15 @@ class FakeMediaRepo:
     async def delete(self, media: Media) -> None:
         self._store.pop(media.id, None)
 
-
     async def mark_optimized(self, media_id: UUID, size_bytes: int) -> None:
         media = self._store.get(media_id)
         if media:
-            media.optimized_at = datetime.now(tz=timezone.utc)
+            media.optimized_at = datetime.now(tz=UTC)
             media.file_size_bytes = size_bytes
 
-    async def list_unoptimized_videos(
-        self, older_than_sec: int, limit: int
-    ) -> list[Media]:
+    async def list_unoptimized_videos(self, older_than_sec: int, limit: int) -> list[Media]:
         return [
-            m
-            for m in self._store.values()
-            if m.media_type == "video" and m.optimized_at is None
+            m for m in self._store.values() if m.media_type == "video" and m.optimized_at is None
         ][:limit]
 
 
@@ -144,11 +141,12 @@ class FakeReviewRepo:
         self._store: dict[UUID, Review] = {}
 
     async def create(self, **kwargs) -> Review:
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         review = Review(
             id=uuid4(),
             session_id=kwargs["session_id"],
             profile_id=kwargs["profile_id"],
+            status="completed",
             narrative=kwargs["narrative"],
             improvement_tips=kwargs["improvement_tips"],
             score_flow=kwargs["score_flow"],
@@ -164,8 +162,56 @@ class FakeReviewRepo:
         self._store[review.id] = review
         return review
 
+    async def create_pending(self, *, session_id: UUID, profile_id: UUID) -> Review:
+        now = datetime.now(tz=UTC)
+        review = Review(
+            id=uuid4(),
+            session_id=session_id,
+            profile_id=profile_id,
+            status="processing",
+            processing_started_at=now,
+            created_at=now,
+        )
+        self._store[review.id] = review
+        return review
+
+    async def mark_completed(self, review_id: UUID, **kwargs) -> Review:
+        review = self._store[review_id]
+        review.status = "completed"
+        review.error_message = None
+        for field in (
+            "narrative",
+            "improvement_tips",
+            "score_flow",
+            "score_drop",
+            "score_balance",
+            "score_wave_selection",
+            "score_maneuvers",
+            "score_arms",
+            "overall_score",
+            "ai_model_version",
+        ):
+            setattr(review, field, kwargs[field])
+        return review
+
+    async def mark_failed(self, review_id: UUID, error_message: str) -> Review:
+        review = self._store[review_id]
+        review.status = "failed"
+        review.error_message = error_message
+        return review
+
+    async def reset_for_retry(self, review_id: UUID) -> Review:
+        review = self._store[review_id]
+        review.status = "processing"
+        review.error_message = None
+        review.processing_started_at = datetime.now(tz=UTC)
+        return review
+
     async def get(self, review_id: UUID) -> Review | None:
         return self._store.get(review_id)
+
+    async def delete(self, review_id: UUID) -> None:
+        self._store.pop(review_id, None)
 
     async def get_for_session(self, session_id: UUID) -> Review | None:
         for r in self._store.values():
@@ -174,20 +220,72 @@ class FakeReviewRepo:
         return None
 
 
-class FakeStorageClient:
+class FakeSurfboardRepo:
     def __init__(self) -> None:
+        self._store: dict[UUID, object] = {}
+
+    async def get_by_id(self, surfboard_id: UUID):
+        return self._store.get(surfboard_id)
+
+
+class FakeArqPool:
+    """Stands in for the arq Redis pool — records enqueued jobs instead of sending them."""
+
+    def __init__(self, *, raise_exc: Exception | None = None) -> None:
+        self.jobs: list[tuple[str, tuple]] = []
+        self._raise_exc = raise_exc
+
+    async def enqueue_job(self, name: str, *args):
+        if self._raise_exc:
+            raise self._raise_exc
+        self.jobs.append((name, args))
+        return None
+
+
+class FakeStorageClient:
+    def __init__(self, *, upload_delay_sec: float = 0.0) -> None:
         self.uploaded: dict[str, bytes] = {}
         self.deleted: list[str] = []
+        self._upload_delay_sec = upload_delay_sec
 
     def upload(self, key: str, data: bytes, content_type: str) -> str:
+        if self._upload_delay_sec:
+            time.sleep(self._upload_delay_sec)  # deliberately blocking, like the real client
         self.uploaded[key] = data
         return f"https://storage.test/surf-media/{key}"
+
+    def upload_file(self, key: str, path: str, content_type: str) -> str:
+        with open(path, "rb") as fh:
+            data = fh.read()
+        return self.upload(key, data, content_type)
 
     def download(self, key: str) -> bytes:
         return self.uploaded.get(key, b"")
 
+    async def stream_range(self, key: str, range_header: str | None = None):
+        from app.core.storage import StorageStream
+
+        result = await self.download_range(key, range_header)
+
+        async def _body():
+            yield result.content
+
+        async def _close() -> None:
+            return None
+
+        return StorageStream(
+            status_code=result.status_code,
+            content_type=result.content_type,
+            content_length=result.content_length,
+            content_range=result.content_range,
+            body=_body(),
+            close=_close,
+        )
+
     async def download_range(
-        self, key: str, range_header: str | None = None,
+        self,
+        key: str,
+        range_header: str | None = None,
     ):
         from app.core.storage import StorageDownloadResult
 
@@ -231,6 +329,12 @@ class FakeFrameExtractor:
     def probe_duration(self, video_bytes: bytes) -> float:
         return self._duration
 
+    def extract_path(self, video_path: str, frame_count: int = 6) -> list[bytes]:
+        return list(self._frames)
+
+    def probe_duration_path(self, video_path: str) -> float:
+        return self._duration
+
 
 class FakeTrainingPlanRepo:
     def __init__(self) -> None:
@@ -249,16 +353,19 @@ class FakeTrainingPlanRepo:
     async def get_workout_by_id(self, workout_id: UUID) -> Workout | None:
         return self._workouts.get(workout_id)
 
-    async def create(self, *, review_id, profile_id, ai_model_version, workouts) -> TrainingPlan:
-        now = datetime.now(tz=timezone.utc)
-        plan = TrainingPlan(
-            id=uuid4(),
-            review_id=review_id,
-            profile_id=profile_id,
-            generated_by="ai",
-            ai_model_version=ai_model_version,
-            created_at=now,
-        )
+    async def list_for_profile(self, profile_id: UUID) -> list[TrainingPlan]:
+        items = [p for p in self._plans.values() if p.profile_id == profile_id]
+        items.sort(key=lambda p: p.created_at, reverse=True)
+        return items
+
+    async def delete(self, plan_id: UUID) -> None:
+        plan = self._plans.pop(plan_id, None)
+        if plan is not None:
+            for w in plan.workouts or []:
+                self._workouts.pop(w.id, None)
+
+    def _attach_workouts(self, plan: TrainingPlan, workouts: list[dict]) -> None:
+        now = datetime.now(tz=UTC)
         plan_workouts = []
         for w_data in workouts:
             workout = Workout(
@@ -269,9 +376,8 @@ class FakeTrainingPlanRepo:
                 focus_area=w_data["focus_area"],
                 created_at=now,
             )
-            workout_exercises = []
-            for idx, ex_data in enumerate(w_data["exercises"], start=1):
-                exercise = Exercise(
+            workout.exercises = [
+                Exercise(
                     id=uuid4(),
                     workout_id=workout.id,
                     sequence_number=idx,
@@ -282,11 +388,60 @@ class FakeTrainingPlanRepo:
                     video_url=ex_data.get("video_url"),
                     created_at=now,
                 )
-                workout_exercises.append(exercise)
-            workout.exercises = workout_exercises
+                for idx, ex_data in enumerate(w_data["exercises"], start=1)
+            ]
             self._workouts[workout.id] = workout
             plan_workouts.append(workout)
         plan.workouts = plan_workouts
+
+    async def create_pending(self, *, review_id: UUID, profile_id: UUID) -> TrainingPlan:
+        now = datetime.now(tz=UTC)
+        plan = TrainingPlan(
+            id=uuid4(),
+            review_id=review_id,
+            profile_id=profile_id,
+            status="processing",
+            generated_by="ai",
+            processing_started_at=now,
+            created_at=now,
+        )
+        plan.workouts = []
+        self._plans[plan.id] = plan
+        return plan
+
+    async def mark_completed(self, plan_id: UUID, *, ai_model_version, workouts) -> TrainingPlan:
+        plan = self._plans[plan_id]
+        plan.status = "completed"
+        plan.error_message = None
+        plan.ai_model_version = ai_model_version
+        self._attach_workouts(plan, workouts)
+        return plan
+
+    async def mark_failed(self, plan_id: UUID, error_message: str) -> TrainingPlan:
+        plan = self._plans[plan_id]
+        plan.status = "failed"
+        plan.error_message = error_message
+        return plan
+
+    async def reset_for_retry(self, plan_id: UUID) -> TrainingPlan:
+        plan = self._plans[plan_id]
+        plan.status = "processing"
+        plan.error_message = None
+        plan.processing_started_at = datetime.now(tz=UTC)
+        return plan
+
+    async def create(self, *, review_id, profile_id, ai_model_version, workouts) -> TrainingPlan:
+        now = datetime.now(tz=UTC)
+        plan = TrainingPlan(
+            id=uuid4(),
+            review_id=review_id,
+            profile_id=profile_id,
+            status="completed",
+            generated_by="ai",
+            ai_model_version=ai_model_version,
+            created_at=now,
+        )
+        self._attach_workouts(plan, workouts)
         self._plans[plan.id] = plan
         return plan
 
@@ -308,6 +463,7 @@ class FakeGeminiService:
         if self._moderation_output is not None:
             return self._moderation_output
         from app.services.ai import ModerationOutput
+
         return ModerationOutput(surf_related=True, explicit_content=False, reason="Surf content.")
 
     def generate_training_plan(self, context):

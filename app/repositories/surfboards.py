@@ -19,9 +19,7 @@ class SurfboardRepository:
         return list(result.scalars().all())
 
     async def get_by_id(self, surfboard_id: UUID) -> Surfboard | None:
-        result = await self.db.execute(
-            select(Surfboard).where(Surfboard.id == surfboard_id)
-        )
+        result = await self.db.execute(select(Surfboard).where(Surfboard.id == surfboard_id))
         return result.scalar_one_or_none()
 
     async def create(

@@ -1,6 +1,11 @@
 from uuid import UUID
 
-from app.core.errors import ForbiddenError, NotFoundError, SurfboardForbiddenError, SurfboardNotFoundError
+from app.core.errors import (
+    ForbiddenError,
+    NotFoundError,
+    SurfboardForbiddenError,
+    SurfboardNotFoundError,
+)
 from app.core.security.jwt import AuthUser
 from app.models.session import Session
 from app.repositories.sessions import SessionsRepository

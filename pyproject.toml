@@ -47,6 +47,13 @@ target-version = "py312"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]
+# B008: FastAPI's dependency-injection idiom is `x = Depends(...)` / `File(...)`
+# in the default argument — a function call in a default is intentional here.
+ignore = ["B008"]
+
+[tool.ruff.lint.per-file-ignores]
+# Alembic migration templates keep the generated import layout.
+"alembic/versions/*" = ["E501"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

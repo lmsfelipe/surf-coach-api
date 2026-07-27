@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import pytest
@@ -15,7 +15,7 @@ def _make_token(**overrides) -> str:
         "sub": str(uuid4()),
         "email": "surfer@example.com",
         "aud": "authenticated",
-        "exp": datetime.now(tz=timezone.utc) + timedelta(hours=1),
+        "exp": datetime.now(tz=UTC) + timedelta(hours=1),
     }
     payload.update(overrides)
     return jwt.encode(payload, settings.SUPABASE_JWT_SECRET, algorithm="HS256")
@@ -30,7 +30,7 @@ def test_valid_token_returns_auth_user():
 
 
 def test_expired_token_rejected():
-    token = _make_token(exp=datetime.now(tz=timezone.utc) - timedelta(minutes=1))
+    token = _make_token(exp=datetime.now(tz=UTC) - timedelta(minutes=1))
     with pytest.raises(InvalidTokenError):
         verify_supabase_jwt(token)
 
@@ -47,7 +47,7 @@ def test_bad_signature_rejected():
         "sub": str(uuid4()),
         "email": "x@y.com",
         "aud": "authenticated",
-        "exp": datetime.now(tz=timezone.utc) + timedelta(hours=1),
+        "exp": datetime.now(tz=UTC) + timedelta(hours=1),
     }
     token = jwt.encode(payload, settings.SUPABASE_JWT_SECRET + "-tampered", algorithm="HS256")
     with pytest.raises(InvalidTokenError):

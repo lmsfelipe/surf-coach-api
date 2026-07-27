@@ -4,6 +4,7 @@ Revision ID: 0009_profiles_and_surfboards
 Revises: 0008_create_exercises
 Create Date: 2026-05-04
 """
+
 from __future__ import annotations
 
 from alembic import op

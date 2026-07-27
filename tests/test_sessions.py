@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
@@ -26,7 +26,7 @@ def _token(user_id: UUID, email: str = "surfer@example.com") -> str:
         "sub": str(user_id),
         "email": email,
         "aud": "authenticated",
-        "exp": datetime.now(tz=timezone.utc) + timedelta(hours=1),
+        "exp": datetime.now(tz=UTC) + timedelta(hours=1),
     }
     return jwt.encode(payload, settings.SUPABASE_JWT_SECRET, algorithm="HS256")
 
@@ -46,8 +46,7 @@ async def test_create_session_returns_201_with_profile_id(client):
             json={
                 "sessionDate": "2026-04-17",
                 "location": "Praia de Santos",
-                "waveConditions": "overhead, clean",
-                "boardType": "shortboard 6'2\"",
+                "waveSize": 1.8,
                 "notes": "Felt good",
             },
         )
@@ -69,7 +68,7 @@ async def test_list_sessions_returns_user_sessions(client):
             json={
                 "sessionDate": "2026-04-10",
                 "location": "Maresias",
-                "waveConditions": "head-high",
+                "waveSize": 1.5,
             },
         )
         await c.post(
@@ -78,7 +77,7 @@ async def test_list_sessions_returns_user_sessions(client):
             json={
                 "sessionDate": "2026-04-17",
                 "location": "Itamambuca",
-                "waveConditions": "chest-high",
+                "waveSize": 1.2,
             },
         )
         r = await c.get("/api/v1/sessions/", headers=headers)
@@ -98,7 +97,7 @@ async def test_get_session_forbidden_for_other_user(client):
             json={
                 "sessionDate": "2026-04-17",
                 "location": "Praia de Santos",
-                "waveConditions": "overhead",
+                "waveSize": 2.0,
             },
         )
         session_id = r.json()["id"]
@@ -121,7 +120,7 @@ async def test_delete_session_returns_204(client):
             json={
                 "sessionDate": "2026-04-17",
                 "location": "Praia de Santos",
-                "waveConditions": "overhead",
+                "waveSize": 2.0,
             },
         )
         session_id = r.json()["id"]

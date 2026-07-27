@@ -4,6 +4,7 @@ Revision ID: 0006_nullable_scores
 Revises: 0005_create_reviews
 Create Date: 2026-04-23
 """
+
 from __future__ import annotations
 
 from alembic import op

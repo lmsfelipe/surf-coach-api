@@ -78,6 +78,18 @@ class FileTooLargeError(AppError):
     message = "File exceeds the maximum allowed size."
 
 
+class RequestTooLargeError(AppError):
+    code = "REQUEST_TOO_LARGE"
+    status_code = status.HTTP_413_CONTENT_TOO_LARGE
+    message = "Request body exceeds the maximum allowed size."
+
+
+class TooManyFilesError(AppError):
+    code = "TOO_MANY_FILES"
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    message = "Too many files in a single upload."
+
+
 class VideoTooLongError(AppError):
     code = "VIDEO_TOO_LONG"
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT

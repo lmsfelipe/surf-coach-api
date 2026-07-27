@@ -5,8 +5,9 @@ Revises: 0010_sessions_wave_board
 Create Date: 2026-07-14
 """
 
-from alembic import op
 import sqlalchemy as sa
+
+from alembic import op
 
 revision = "0011_async_processing"
 down_revision = "0010_sessions_wave_board"
@@ -27,9 +28,7 @@ def upgrade() -> None:
         schema="public",
     )
     # Allow narrative and improvement_tips to be NULL (for processing state)
-    op.alter_column(
-        "reviews", "narrative", existing_type=sa.Text(), nullable=True, schema="public"
-    )
+    op.alter_column("reviews", "narrative", existing_type=sa.Text(), nullable=True, schema="public")
     op.alter_column(
         "reviews",
         "improvement_tips",

@@ -33,9 +33,7 @@ class Review(Base):
         ForeignKey("public.profiles.id", ondelete="CASCADE"),
         nullable=False,
     )
-    status: Mapped[str] = mapped_column(
-        String(20), nullable=False, server_default="completed"
-    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, server_default="completed")
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     narrative: Mapped[str | None] = mapped_column(Text, nullable=True)
     improvement_tips: Mapped[list[str] | None] = mapped_column(ARRAY(Text), nullable=True)

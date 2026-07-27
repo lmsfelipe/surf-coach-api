@@ -59,15 +59,16 @@ class MediaRepository:
         )
         await self.db.commit()
 
-    async def list_unoptimized_videos(
-        self, older_than_sec: int, limit: int
-    ) -> list[Media]:
+    async def list_unoptimized_videos(self, older_than_sec: int, limit: int) -> list[Media]:
         result = await self.db.execute(
-            select(Media).where(
+            select(Media)
+            .where(
                 Media.media_type == "video",
                 Media.optimized_at.is_(None),
                 Media.created_at < text("now() - make_interval(secs => :older_than_sec)"),
-            ).order_by(Media.created_at).limit(limit),
+            )
+            .order_by(Media.created_at)
+            .limit(limit),
             {"older_than_sec": older_than_sec},
         )
         return list(result.scalars().all())

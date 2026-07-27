@@ -1,47 +1,44 @@
 """Tests for Phase 3: AI-Generated Training Plans."""
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
-from decimal import Decimal
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from jose import jwt
+from pydantic import ValidationError
 
 from app.api import ai as ai_api
 from app.core.config import get_settings
+from app.core.deps import get_arq_pool
 from app.core.errors import (
     AIParseFailedError,
-    ForbiddenError,
-    ReviewNotFoundError,
-    TrainingPlanAlreadyExistsError,
 )
 from app.main import app
 from app.models.review import Review
-from app.models.session import Session
 from app.services.ai import (
-    ExerciseOutput,
     TrainingContext,
     TrainingPlanOutput,
     TrainingService,
-    WorkoutOutput,
 )
 from tests.fake_deps import (
+    FakeArqPool,
     FakeAuthRepo,
+    FakeGeminiService,
     FakeReviewRepo,
     FakeTrainingPlanRepo,
-    FakeGeminiService,
+    decimal,
     make_review_output,
     make_training_plan_output,
-    decimal,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _token(user_id: UUID, email: str = "surfer@example.com") -> str:
     settings = get_settings()
@@ -49,7 +46,7 @@ def _token(user_id: UUID, email: str = "surfer@example.com") -> str:
         "sub": str(user_id),
         "email": email,
         "aud": "authenticated",
-        "exp": datetime.now(tz=timezone.utc) + timedelta(hours=1),
+        "exp": datetime.now(tz=UTC) + timedelta(hours=1),
     }
     return jwt.encode(payload, settings.SUPABASE_JWT_SECRET, algorithm="HS256")
 
@@ -74,13 +71,14 @@ def _make_review(user_id: UUID, session_id: UUID | None = None) -> Review:
         score_arms=decimal(6.5),
         overall_score=decimal(6.6),
         ai_model_version="gemini-1.5-pro",
-        created_at=datetime.now(tz=timezone.utc),
+        created_at=datetime.now(tz=UTC),
     )
 
 
 # ---------------------------------------------------------------------------
 # Unit: TrainingContext construction
 # ---------------------------------------------------------------------------
+
 
 def test_training_context_from_review_and_profile():
     from app.models.profile import Profile
@@ -92,8 +90,8 @@ def test_training_context_from_review_and_profile():
         surf_level="intermediate",
         height_cm=175,
         weight_kg=70,
-        created_at=datetime.now(tz=timezone.utc),
-        updated_at=datetime.now(tz=timezone.utc),
+        created_at=datetime.now(tz=UTC),
+        updated_at=datetime.now(tz=UTC),
     )
 
     ctx = TrainingContext(
@@ -101,8 +99,12 @@ def test_training_context_from_review_and_profile():
         improvement_tips=list(review.improvement_tips),
         score_flow=float(review.score_flow) if review.score_flow is not None else None,
         score_balance=float(review.score_balance) if review.score_balance is not None else None,
-        score_maneuvers=float(review.score_maneuvers) if review.score_maneuvers is not None else None,
-        score_wave_selection=float(review.score_wave_selection) if review.score_wave_selection is not None else None,
+        score_maneuvers=(
+            float(review.score_maneuvers) if review.score_maneuvers is not None else None
+        ),
+        score_wave_selection=(
+            float(review.score_wave_selection) if review.score_wave_selection is not None else None
+        ),
         score_drop=float(review.score_drop) if review.score_drop is not None else None,
         score_arms=float(review.score_arms) if review.score_arms is not None else None,
         overall_score=float(review.overall_score) if review.overall_score is not None else None,
@@ -127,6 +129,7 @@ def test_training_context_from_review_and_profile():
 # Unit: TrainingPlanOutput parsing
 # ---------------------------------------------------------------------------
 
+
 def test_training_plan_output_parses_valid_json():
     exercise = json.dumps(
         {"name": "Ex", "description": "D", "sets": 3, "reps": "10", "video_url": None}
@@ -148,32 +151,40 @@ def test_training_plan_output_parses_valid_json():
 
 
 def test_training_plan_output_missing_exercises_raises():
-    raw = (
-        '{"workouts": [{"sequence_number": 1, "title": "T", "focus_area": "F"}]}'
-    )
-    with pytest.raises(Exception):
+    raw = '{"workouts": [{"sequence_number": 1, "title": "T", "focus_area": "F"}]}'
+    with pytest.raises(ValidationError):
         TrainingPlanOutput.model_validate_json(raw)
 
 
 def test_gemini_service_raises_on_wrong_workout_count():
-    """GeminiService.generate_training_plan raises AIParseFailedError if workout count != setting."""
-    from app.services.ai import GeminiService
+    """generate_training_plan raises AIParseFailedError when the workout count is wrong."""
     import json
 
+    from app.services.ai import GeminiService
+
     # Build a fake response with only 2 workouts
-    raw_2_workouts = json.dumps({
-        "workouts": [
-            {
-                "sequence_number": i,
-                "title": f"T{i}",
-                "focus_area": f"F{i}",
-                "exercises": [
-                    {"name": "Ex", "description": "D", "sets": 3, "reps": "10", "video_url": None}
-                ] * 5,
-            }
-            for i in range(1, 3)
-        ]
-    })
+    raw_2_workouts = json.dumps(
+        {
+            "workouts": [
+                {
+                    "sequence_number": i,
+                    "title": f"T{i}",
+                    "focus_area": f"F{i}",
+                    "exercises": [
+                        {
+                            "name": "Ex",
+                            "description": "D",
+                            "sets": 3,
+                            "reps": "10",
+                            "video_url": None,
+                        }
+                    ]
+                    * 5,
+                }
+                for i in range(1, 3)
+            ]
+        }
+    )
 
     class _BadGemini(GeminiService):
         def __init__(self):
@@ -187,10 +198,17 @@ def test_gemini_service_raises_on_wrong_workout_count():
 
     svc = _BadGemini()
     ctx = TrainingContext(
-        surf_level="beginner", improvement_tips=[], score_flow=None,
-        score_balance=None, score_maneuvers=None, score_wave_selection=None,
-        score_drop=None, score_arms=None, overall_score=None,
-        height_cm=None, weight_kg=None,
+        surf_level="beginner",
+        improvement_tips=[],
+        score_flow=None,
+        score_balance=None,
+        score_maneuvers=None,
+        score_wave_selection=None,
+        score_drop=None,
+        score_arms=None,
+        overall_score=None,
+        height_cm=None,
+        weight_kg=None,
     )
     with pytest.raises(AIParseFailedError):
         svc.generate_training_plan(ctx)
@@ -199,6 +217,7 @@ def test_gemini_service_raises_on_wrong_workout_count():
 # ---------------------------------------------------------------------------
 # Integration fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest.fixture
 def training_ctx():
@@ -220,30 +239,57 @@ def training_ctx():
         "reviews": review_repo,
         "plans": plan_repo,
         "gemini": gemini,
+        "arq": FakeArqPool(),
     }
+
+
+def _build_training_service(ctx) -> TrainingService:
+    return TrainingService(
+        review_repo=ctx["reviews"],
+        auth_repo=ctx["auth"],
+        training_plan_repo=ctx["plans"],
+        gemini=ctx["gemini"],
+    )
 
 
 @pytest.fixture(autouse=True)
 def _override_training_deps(training_ctx):
-    def _training_service() -> TrainingService:
-        return TrainingService(
-            review_repo=training_ctx["reviews"],
-            auth_repo=training_ctx["auth"],
-            training_plan_repo=training_ctx["plans"],
-            gemini=training_ctx["gemini"],
-        )
-
-    app.dependency_overrides[ai_api.get_training_service] = _training_service
+    app.dependency_overrides[ai_api.get_training_service] = lambda: _build_training_service(
+        training_ctx
+    )
+    app.dependency_overrides[get_arq_pool] = lambda: training_ctx["arq"]
     yield
     app.dependency_overrides.pop(ai_api.get_training_service, None)
+    app.dependency_overrides.pop(get_arq_pool, None)
+
+
+async def _create_completed_plan(c: AsyncClient, ctx, user_id: UUID, review_id: UUID) -> dict:
+    """POST a plan (202, pending) then run the worker step so workouts exist."""
+    r = await c.post(
+        "/api/v1/training-plans/",
+        json={"reviewId": str(review_id)},
+        headers={"Authorization": f"Bearer {_token(user_id)}"},
+    )
+    assert r.status_code == 202
+    plan_id = UUID(r.json()["id"])
+    await _build_training_service(ctx).process_training_plan(plan_id)
+
+    get_r = await c.get(
+        f"/api/v1/training-plans/{plan_id}",
+        headers={"Authorization": f"Bearer {_token(user_id)}"},
+    )
+    assert get_r.status_code == 200
+    return get_r.json()
 
 
 # ---------------------------------------------------------------------------
 # POST /api/v1/training-plans/ — generate plan
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
-async def test_generate_training_plan_returns_201(client, training_ctx):
+async def test_generate_training_plan_accepts_and_enqueues(client, training_ctx):
+    """POST /training-plans/ is async: 202 with a pending row, workouts filled in later."""
     user_id = training_ctx["user_id"]
     review = training_ctx["review"]
     tok = _token(user_id)
@@ -255,14 +301,47 @@ async def test_generate_training_plan_returns_201(client, training_ctx):
             headers={"Authorization": f"Bearer {tok}"},
         )
 
-    assert r.status_code == 201
+    assert r.status_code == 202
     body = r.json()
     assert body["reviewId"] == str(review.id)
     assert body["profileId"] == str(user_id)
     assert body["generatedBy"] == "ai"
+    assert body["status"] == "processing"
+    assert body["workouts"] == []
+
+    assert training_ctx["arq"].jobs == [("process_training_plan_task", (body["id"],))]
+
+
+@pytest.mark.anyio
+async def test_process_training_plan_fills_in_workouts(client, training_ctx):
+    user_id = training_ctx["user_id"]
+    review = training_ctx["review"]
+
+    async with client as c:
+        body = await _create_completed_plan(c, training_ctx, user_id, review.id)
+
+    assert body["status"] == "completed"
     assert len(body["workouts"]) == 3
     for w in body["workouts"]:
         assert len(w["exercises"]) == 5
+
+
+@pytest.mark.anyio
+async def test_generate_plan_marks_failed_when_enqueue_fails(client, training_ctx):
+    training_ctx["arq"] = FakeArqPool(raise_exc=RuntimeError("redis down"))
+    user_id = training_ctx["user_id"]
+    review = training_ctx["review"]
+
+    async with client as c:
+        r = await c.post(
+            "/api/v1/training-plans/",
+            json={"reviewId": str(review.id)},
+            headers={"Authorization": f"Bearer {_token(user_id)}"},
+        )
+
+    assert r.status_code == 202
+    assert r.json()["status"] == "failed"
+    assert r.json()["errorMessage"] == ai_api.ENQUEUE_FAILED_MESSAGE
 
 
 @pytest.mark.anyio
@@ -310,7 +389,7 @@ async def test_generate_plan_duplicate_returns_409(client, training_ctx):
             json={"reviewId": str(review.id)},
             headers={"Authorization": f"Bearer {tok}"},
         )
-        assert r1.status_code == 201
+        assert r1.status_code == 202
 
         r2 = await c.post(
             "/api/v1/training-plans/",
@@ -326,28 +405,16 @@ async def test_generate_plan_duplicate_returns_409(client, training_ctx):
 # GET /api/v1/training-plans/{plan_id}
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_get_training_plan_by_id(client, training_ctx):
     user_id = training_ctx["user_id"]
     review = training_ctx["review"]
-    tok = _token(user_id)
 
     async with client as c:
-        create_r = await c.post(
-            "/api/v1/training-plans/",
-            json={"reviewId": str(review.id)},
-            headers={"Authorization": f"Bearer {tok}"},
-        )
-        plan_id = create_r.json()["id"]
+        plan = await _create_completed_plan(c, training_ctx, user_id, review.id)
 
-        get_r = await c.get(
-            f"/api/v1/training-plans/{plan_id}",
-            headers={"Authorization": f"Bearer {tok}"},
-        )
-
-    assert get_r.status_code == 200
-    assert get_r.json()["id"] == plan_id
-    assert len(get_r.json()["workouts"]) == 3
+    assert len(plan["workouts"]) == 3
 
 
 @pytest.mark.anyio
@@ -357,15 +424,10 @@ async def test_get_training_plan_wrong_owner_returns_403(client, training_ctx):
     review = training_ctx["review"]
 
     async with client as c:
-        create_r = await c.post(
-            "/api/v1/training-plans/",
-            json={"reviewId": str(review.id)},
-            headers={"Authorization": f"Bearer {_token(user_id)}"},
-        )
-        plan_id = create_r.json()["id"]
+        plan = await _create_completed_plan(c, training_ctx, user_id, review.id)
 
         get_r = await c.get(
-            f"/api/v1/training-plans/{plan_id}",
+            f"/api/v1/training-plans/{plan['id']}",
             headers={"Authorization": f"Bearer {_token(other_id)}"},
         )
 
@@ -376,6 +438,7 @@ async def test_get_training_plan_wrong_owner_returns_403(client, training_ctx):
 # GET /api/v1/reviews/{review_id}/training-plan
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_get_training_plan_for_review(client, training_ctx):
     user_id = training_ctx["user_id"]
@@ -383,12 +446,7 @@ async def test_get_training_plan_for_review(client, training_ctx):
     tok = _token(user_id)
 
     async with client as c:
-        create_r = await c.post(
-            "/api/v1/training-plans/",
-            json={"reviewId": str(review.id)},
-            headers={"Authorization": f"Bearer {tok}"},
-        )
-        plan_id = create_r.json()["id"]
+        plan = await _create_completed_plan(c, training_ctx, user_id, review.id)
 
         get_r = await c.get(
             f"/api/v1/reviews/{review.id}/training-plan",
@@ -396,7 +454,7 @@ async def test_get_training_plan_for_review(client, training_ctx):
         )
 
     assert get_r.status_code == 200
-    assert get_r.json()["id"] == plan_id
+    assert get_r.json()["id"] == plan["id"]
 
 
 @pytest.mark.anyio
@@ -418,6 +476,7 @@ async def test_get_training_plan_for_review_no_plan_returns_404(client, training
 # GET /api/v1/workouts/{workout_id}
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.anyio
 async def test_get_workout_by_id(client, training_ctx):
     user_id = training_ctx["user_id"]
@@ -425,12 +484,8 @@ async def test_get_workout_by_id(client, training_ctx):
     tok = _token(user_id)
 
     async with client as c:
-        create_r = await c.post(
-            "/api/v1/training-plans/",
-            json={"reviewId": str(review.id)},
-            headers={"Authorization": f"Bearer {tok}"},
-        )
-        workout_id = create_r.json()["workouts"][1]["id"]
+        plan = await _create_completed_plan(c, training_ctx, user_id, review.id)
+        workout_id = plan["workouts"][1]["id"]
 
         get_r = await c.get(
             f"/api/v1/workouts/{workout_id}",
@@ -449,12 +504,8 @@ async def test_get_workout_wrong_owner_returns_403(client, training_ctx):
     review = training_ctx["review"]
 
     async with client as c:
-        create_r = await c.post(
-            "/api/v1/training-plans/",
-            json={"reviewId": str(review.id)},
-            headers={"Authorization": f"Bearer {_token(user_id)}"},
-        )
-        workout_id = create_r.json()["workouts"][0]["id"]
+        plan = await _create_completed_plan(c, training_ctx, user_id, review.id)
+        workout_id = plan["workouts"][0]["id"]
 
         get_r = await c.get(
             f"/api/v1/workouts/{workout_id}",
