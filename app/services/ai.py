@@ -355,6 +355,18 @@ class GeminiService:
             "Você é um treinador especialista em preparação física para surf. "
             f"Gere um plano de treino estruturado com exatamente {workout_count} treinos, "
             "personalizado com base nos dados de performance e áreas de melhoria do surfista. "
+            "Gere SUGESTÕES gerais e educativas de movimento, não prescrições "
+            "personalizadas: enquadre tudo como 'exercícios que costumam ajudar com...', "
+            "nunca como 'você deve fazer...'. "
+            "Foque em mobilidade, equilíbrio, estabilidade de core e mecânica do pop-up, "
+            "usando movimentos de baixo risco com o peso do próprio corpo. "
+            "NÃO prescreva cargas externas, pesos, halteres, barra, kettlebell, programas "
+            "de força com carga, nem parâmetros específicos de resistência (ex.: '4x12 "
+            "agachamentos com X kg'). "
+            "Nunca presuma o histórico de lesões, condição médica ou nível de "
+            "condicionamento do surfista. "
+            "Mantenha os exercícios seguros para executar sem supervisão; se alguma "
+            "limitação for relevante, recomende consultar um profissional qualificado. "
             "Responda sempre em português do Brasil."
         )
         context_block = json.dumps(context.model_dump(), ensure_ascii=False, indent=2)
