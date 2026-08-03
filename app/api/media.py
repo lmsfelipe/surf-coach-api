@@ -1,7 +1,9 @@
+from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile, status
-from fastapi.responses import StreamingResponse
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
@@ -16,7 +18,7 @@ from app.core.upload import SpooledUpload, spool_upload
 from app.models.media import Media
 from app.repositories.media import MediaRepository
 from app.repositories.sessions import SessionsRepository
-from app.schemas.media import MediaOut
+from app.schemas.media import BatchUploadResult, MediaOut
 from app.services.ai import GeminiService
 from app.services.media import MediaService
 
@@ -78,9 +80,10 @@ def _storage_key_from_url(url: str) -> str:
 
 @router.post(
     "/sessions/{session_id}/media/",
-    response_model=list[MediaOut],
+    response_model=list[MediaOut],  # the 201 shape — unchanged
     response_model_by_alias=True,
     status_code=status.HTTP_201_CREATED,
+    responses={status.HTTP_207_MULTI_STATUS: {"model": BatchUploadResult}},  # additive
 )
 @limiter.limit(lambda: get_settings().RATE_LIMIT_UPLOAD)
 async def upload_media(
@@ -89,7 +92,7 @@ async def upload_media(
     file: list[UploadFile] = File(...),
     user: AuthUser = Depends(get_current_user),
     service: MediaService = Depends(get_media_service),
-) -> list[MediaOut]:
+) -> Any:
     # Part count first: it is the only check that costs nothing. The total body
     # size is already capped by BodySizeLimitMiddleware, which runs before the
     # multipart parser touches the stream.
@@ -98,16 +101,26 @@ async def upload_media(
     max_bytes = get_settings().MAX_UPLOAD_SIZE_MB * 1024 * 1024
     uploads: list[SpooledUpload] = []
     try:
+        # Spooling stays sequential — it reads one multipart body stream; only
+        # the store leg inside upload_batch is parallelized.
         for part in file:
             uploads.append(await spool_upload(part, max_bytes))
 
         service.validate_upload_counts([u.head() for u in uploads])
 
-        results = []
-        for upload in uploads:
-            media = await service.upload(session_id=session_id, upload=upload, user=user)
-            results.append(_media_to_out(media, user.id))
-        return results
+        result = await service.upload_batch(session_id=session_id, uploads=uploads, user=user)
+        succeeded = [_media_to_out(m, user.id) for m in result.succeeded]
+        if not result.failed:
+            return succeeded  # 201, list[MediaOut] — byte-for-byte as today
+
+        # Some files stored, some hit STORAGE_UPLOAD_FAILED. Return a JSONResponse
+        # so the 207 body bypasses response_model=list[MediaOut] (which would
+        # otherwise try to coerce the envelope into a bare list).
+        body = BatchUploadResult(succeeded=succeeded, failed=result.failed)
+        return JSONResponse(
+            status_code=status.HTTP_207_MULTI_STATUS,
+            content=jsonable_encoder(body, by_alias=True),
+        )
     finally:
         for upload in uploads:
             upload.close()

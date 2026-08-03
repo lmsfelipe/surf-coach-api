@@ -50,7 +50,9 @@ Both use the same error envelope shape the API already uses for every other erro
 
 Moderation runs **per file**, sequentially, during the batch upload. The first file that fails causes the entire request to return a 422. Files processed before the failure are **not** stored.
 
-This means the frontend does **not** need to handle partial-upload state — the response is always all-or-nothing: either `201` with all media objects, or a `422` with a single error object.
+This means the frontend does **not** need to handle partial-upload state for moderation — the moderation response is always all-or-nothing: either `201` with all media objects, or a `422` with a single error object.[^storage-partial]
+
+[^storage-partial]: Moderation stays whole-request, but a transient **storage** failure on a subset of an otherwise-valid batch can now return `207 Multi-Status` with a `BatchUploadResult` (`{ succeeded, failed }`). That is a separate, additive case handled in `SPEC_BACKEND_Media_Upload_Optimization.md` §11 — it does not change any moderation copy or the `422` moderation flow described here.
 
 ---
 

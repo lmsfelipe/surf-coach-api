@@ -1,4 +1,5 @@
 import asyncio
+from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -13,6 +14,7 @@ from app.core.errors import (
     InvalidMediaTypeError,
     MediaNotSurfRelatedError,
     NotFoundError,
+    StorageUploadFailedError,
     TooFewPhotosError,
     TooManyFilesError,
     TooManyPhotosError,
@@ -26,6 +28,7 @@ from app.core.upload import SpooledUpload
 from app.models.media import Media
 from app.repositories.media import MediaRepository
 from app.repositories.sessions import SessionsRepository
+from app.schemas.media import FailedUpload
 
 logger = structlog.get_logger(__name__)
 
@@ -46,6 +49,42 @@ MIME_EXT = {
     "video/quicktime": "mov",
     "video/x-m4v": "m4v",
 }
+
+
+@dataclass
+class _ValidatedMedia:
+    """One file that passed Phase 0 (validate + moderate). Carries the spooled
+    handle plus the resolved facts needed to store it — but no DB access."""
+
+    upload: SpooledUpload
+    media_type: str  # "image" | "video"
+    detected_mime: str
+    storage_key: str
+    duration_seconds: Decimal | None
+    file_name: str
+    file_size_bytes: int
+
+
+@dataclass
+class _PreparedMedia:
+    """Inert metadata for one stored object — the output of Phase A. Holds no ORM
+    state, so it is safe to produce inside a ``gather``-ed coroutine (§4.1)."""
+
+    media_type: str  # "image" | "video"
+    storage_url: str  # returned by storage.upload_file
+    file_name: str
+    file_size_bytes: int
+    duration_seconds: Decimal | None
+
+
+@dataclass
+class BatchUploadResult:
+    """Domain result of :meth:`MediaService.upload_batch` — ORM rows that stored
+    cleanly plus per-file storage failures. The route converts ``succeeded`` into
+    ``MediaOut`` and builds the Pydantic 207 body (see app/schemas/media.py)."""
+
+    succeeded: list[Media]
+    failed: list[FailedUpload]
 
 
 class MediaService:
@@ -105,17 +144,84 @@ class MediaService:
     ) -> Media:
         """Validate, moderate and store one already-spooled upload.
 
-        Every expensive step here is synchronous — OpenCV decodes, the Gemini
-        round-trip, the Supabase PUT — so each runs on a worker thread. The API
-        process serves all traffic on a single event loop; leaving any of these
-        inline stalls every other request, health checks included.
+        Thin wrapper over :meth:`upload_batch` so existing single-file callers
+        keep working. A single-file storage failure surfaces as a whole-request
+        502, exactly as before (``upload_batch`` raises when every file fails).
         """
+        result = await self.upload_batch(session_id, [upload], user)
+        return result.succeeded[0]
+
+    async def upload_batch(
+        self,
+        session_id: UUID,
+        uploads: list[SpooledUpload],
+        user: AuthUser,
+    ) -> BatchUploadResult:
+        """Validate, moderate and store a batch of already-spooled uploads.
+
+        Three phases (§4 of the media-upload-optimization spec):
+
+        - Phase 0 — validate + moderate every file first (fail-fast,
+          whole-request). Any failure raises here and returns the existing 4xx,
+          before a single object is stored.
+        - Phase A — store bytes concurrently, thread-offloaded and bounded by a
+          semaphore. Only STORAGE_UPLOAD_FAILED is expected per file. No coroutine
+          touches the DB session — an AsyncSession is not concurrency-safe (§4.1).
+        - Phase B — persist the files that stored cleanly in one bulk insert.
+        """
+        # (1) Authorize once for the whole batch — same session across all files.
         session = await self.sessions_repo.get(session_id)
         if session is None:
             raise NotFoundError("Session not found.")
         if session.profile_id != user.id:
             raise ForbiddenError()
 
+        # (2) Phase 0: validate + moderate EVERY file first. Any failure raises
+        #     here and the whole request returns the existing 4xx — nothing stored.
+        validated = [await self._validate(session_id, u, user) for u in uploads]
+
+        # (3) Phase A: store bytes concurrently. return_exceptions keeps one
+        #     file's failure from cancelling the siblings still uploading.
+        sem = asyncio.Semaphore(self.settings.UPLOAD_CONCURRENCY)
+
+        async def _store(v: _ValidatedMedia) -> _PreparedMedia:
+            async with sem:
+                return await self._store_object(v)
+
+        results = await asyncio.gather(*(_store(v) for v in validated), return_exceptions=True)
+
+        # (4) Partition. gather preserves order, so results zip back to their parts.
+        prepared: list[_PreparedMedia] = []
+        failed: list[FailedUpload] = []
+        for v, result in zip(validated, results, strict=True):
+            if isinstance(result, _PreparedMedia):
+                prepared.append(result)
+            elif isinstance(result, StorageUploadFailedError):
+                failed.append(FailedUpload.from_error(v.file_name, result))
+                await self._cleanup_partial(v)  # best-effort delete of a half-write
+            else:
+                raise result  # not an expected storage failure: surface it
+
+        # (5) All files failed to store → whole-request 502, unchanged contract.
+        if uploads and not prepared:
+            raise StorageUploadFailedError()
+
+        # (6) Phase B: persist the files that stored cleanly — one bulk insert,
+        #     one commit. `prepared` keeps upload order, so response order is stable.
+        stored = await self.media_repo.create_many(session_id=session_id, items=prepared)
+        return BatchUploadResult(succeeded=stored, failed=failed)
+
+    async def _validate(
+        self,
+        session_id: UUID,
+        upload: SpooledUpload,
+        user: AuthUser,
+    ) -> _ValidatedMedia:
+        """Phase 0 for one file: size, libmagic sniff, duration cap, moderation.
+
+        Raises the same 4xx errors as the old ``upload()`` did — a failure here
+        rejects the whole batch. Touches no DB session and stores nothing.
+        """
         max_bytes = self.settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
         if upload.size > max_bytes:
             raise FileTooLargeError(
@@ -146,19 +252,40 @@ class MediaService:
         ext = MIME_EXT.get(detected_mime, "bin")
         storage_key = f"{user.id}/{session_id}/{media_id}.{ext}"
 
-        storage_url = await asyncio.to_thread(
-            self.storage.upload_file, storage_key, upload.path, detected_mime
-        )
-
-        media = await self.media_repo.create(
-            session_id=session_id,
+        return _ValidatedMedia(
+            upload=upload,
             media_type=media_type,
-            storage_url=storage_url,
+            detected_mime=detected_mime,
+            storage_key=storage_key,
+            duration_seconds=duration_seconds,
             file_name=upload.file_name,
             file_size_bytes=upload.size,
-            duration_seconds=duration_seconds,
         )
-        return media
+
+    async def _store_object(self, v: _ValidatedMedia) -> _PreparedMedia:
+        """Phase A for one file: the Supabase PUT, thread-offloaded. No DB access.
+
+        Raises ``StorageUploadFailedError`` on a transient storage/network blip —
+        the one per-file failure that yields a 207 rather than failing the batch.
+        """
+        storage_url = await asyncio.to_thread(
+            self.storage.upload_file, v.storage_key, v.upload.path, v.detected_mime
+        )
+        return _PreparedMedia(
+            media_type=v.media_type,
+            storage_url=storage_url,
+            file_name=v.file_name,
+            file_size_bytes=v.file_size_bytes,
+            duration_seconds=v.duration_seconds,
+        )
+
+    async def _cleanup_partial(self, v: _ValidatedMedia) -> None:
+        """Best-effort delete of a half-written object after a storage failure.
+
+        ``StorageClient.delete`` already swallows its own errors, so this never
+        masks the storage failure that triggered it.
+        """
+        await asyncio.to_thread(self.storage.delete, v.storage_key)
 
     async def list_media(self, session_id: UUID, user: AuthUser) -> list[Media]:
         session = await self.sessions_repo.get(session_id)

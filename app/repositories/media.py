@@ -1,10 +1,16 @@
+from __future__ import annotations
+
 from decimal import Decimal
+from typing import TYPE_CHECKING
 from uuid import UUID
 
-from sqlalchemy import select, text
+from sqlalchemy import insert, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.media import Media
+
+if TYPE_CHECKING:
+    from app.services.media import _PreparedMedia
 
 
 class MediaRepository:
@@ -33,6 +39,33 @@ class MediaRepository:
         await self.db.commit()
         await self.db.refresh(media)
         return media
+
+    async def create_many(self, *, session_id: UUID, items: list[_PreparedMedia]) -> list[Media]:
+        """Insert N media rows in one round-trip, preserving input order.
+
+        Replaces N × (add + commit + refresh) with a single INSERT … RETURNING.
+        ``sort_by_parameter_order=True`` is REQUIRED: without it, RETURNING with
+        executemany does not guarantee returned-row order matches input order,
+        which would scramble ``succeeded[]`` vs upload order.
+        """
+        if not items:
+            return []
+        result = await self.db.execute(
+            insert(Media).returning(Media, sort_by_parameter_order=True),
+            [
+                {
+                    "session_id": session_id,
+                    "media_type": it.media_type,
+                    "storage_url": it.storage_url,
+                    "file_name": it.file_name,
+                    "file_size_bytes": it.file_size_bytes,
+                    "duration_seconds": it.duration_seconds,
+                }
+                for it in items
+            ],
+        )
+        await self.db.commit()
+        return list(result.scalars().all())
 
     async def get(self, media_id: UUID) -> Media | None:
         result = await self.db.execute(select(Media).where(Media.id == media_id))

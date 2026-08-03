@@ -10,7 +10,7 @@
 ## 1. Problem
 
 Session videos are uploaded and stored **raw** in Supabase Storage
-(`MediaService.upload`, `app/services/media.py:128`) — up to
+(`MediaService._store_object`, `app/services/media.py`) — up to
 `MAX_UPLOAD_SIZE_MB = 100` per file, `MAX_VIDEOS = 3` per session. They are
 never re-encoded, so a phone clip (often 60–120 MB, frequently HEVC/`.mov`)
 sits in storage at full size for its entire life.
@@ -165,8 +165,8 @@ reporting without occupying a thread for the full encode.
 ### 4.3 Storage strategy — overwrite in place
 
 The compressed bytes are upserted to the **same storage key** the raw occupied
-(`{user_id}/{session_id}/{media_id}.{ext}`, `app/services/media.py:126`), with
-content-type forced to `video/mp4`:
+(`{user_id}/{session_id}/{media_id}.{ext}`, built in `MediaService._validate`,
+`app/services/media.py`), with content-type forced to `video/mp4`:
 
 ```python
 await asyncio.to_thread(storage.upload, key, compressed, "video/mp4")

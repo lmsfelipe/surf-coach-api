@@ -40,6 +40,13 @@ class Settings(BaseSettings):
         ),
     )
     MAX_VIDEO_DURATION_SEC: int = Field(default=120, description="Video duration cap (s)")
+    UPLOAD_CONCURRENCY: int = Field(
+        default=4,
+        description=(
+            "Max files stored in flight per batch upload. 1 = sequential stores "
+            "(config-only rollback lever)."
+        ),
+    )
     SUPABASE_BUCKET: str = Field(default="surf-media", description="Supabase Storage bucket")
     TRAINING_WORKOUTS_PER_PLAN: int = Field(
         default=3, description="Number of workouts Gemini generates per plan"

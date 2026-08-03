@@ -97,6 +97,25 @@ class FakeMediaRepo:
         self._store[media.id] = media
         return media
 
+    async def create_many(self, *, session_id, items) -> list[Media]:
+        now = datetime.now(tz=UTC)
+        created: list[Media] = []
+        for it in items:
+            media = Media(
+                id=uuid4(),
+                session_id=session_id,
+                media_type=it.media_type,
+                storage_url=it.storage_url,
+                file_name=it.file_name,
+                file_size_bytes=it.file_size_bytes,
+                duration_seconds=it.duration_seconds,
+                optimized_at=None,
+                created_at=now,
+            )
+            self._store[media.id] = media
+            created.append(media)
+        return created
+
     async def get(self, media_id: UUID) -> Media | None:
         return self._store.get(media_id)
 
