@@ -82,8 +82,11 @@ SYSTEM_PERSONA = (
     "Você é um treinador de surf experiente com 20 anos de experiência analisando vídeos e fotos de surfe. "  # noqa: E501
     "Forneça feedback estruturado e acionável calibrado ao nível de habilidade do surfista. "
     "IMPORTANTE: avalie SOMENTE o que está visível nas mídias fornecidas. "
-    "Se um aspecto técnico (ex: descida, manobra, uso dos braços) não aparecer nas imagens, "
-    "não invente uma avaliação — retorne null na pontuação correspondente."
+    "Se um aspecto técnico (ex: drop, manobra, uso dos braços) não aparecer nas imagens, "
+    "não invente uma avaliação — retorne null na pontuação correspondente. "
+    "O tamanho da onda informado no contexto está em METROS (altura da face da onda). "
+    "Ao mencionar o tamanho da onda, use sempre o valor em metros exatamente como fornecido "
+    "e NUNCA o converta para pés."
 )
 
 OUTPUT_SCHEMA_INSTRUCTION = (
@@ -124,7 +127,8 @@ REFINE_PERSONA = (
     "por exemplo, reconhecendo as sensações, dúvidas ou objetivos que o surfista mencionou. "
     "NUNCA deixe o tom do relato (otimista ou pessimista) mudar a sua avaliação técnica: "
     "ela reflete apenas o que foi observado nas mídias, e as pontuações permanecem inalteradas. "
-    "Não contradiga a evidência visual. Mantenha exatamente 3 dicas acionáveis."
+    "Não contradiga a evidência visual. Mantenha exatamente 3 dicas acionáveis. "
+    "O tamanho da onda está em METROS: ao mencioná-lo, use sempre metros e NUNCA converta para pés."
 )
 
 REFINE_OUTPUT_SCHEMA_INSTRUCTION = (
@@ -541,7 +545,7 @@ class ReviewService:
         context = SurferContext(
             skill_level=skill_level,
             location=session.location,
-            wave_conditions=f"{session.wave_size} m",
+            wave_conditions=f"{session.wave_size} metros",
             board_type=board_type,
         )
 
