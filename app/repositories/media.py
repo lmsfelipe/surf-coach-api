@@ -92,12 +92,27 @@ class MediaRepository:
         )
         await self.db.commit()
 
-    async def list_unoptimized_videos(self, older_than_sec: int, limit: int) -> list[Media]:
+    async def increment_optimize_attempts(self, media_id: UUID) -> None:
+        """Record one failed optimization attempt so the sweep can eventually give up."""
+        await self.db.execute(
+            text(
+                "UPDATE public.media "
+                "SET optimize_attempts = optimize_attempts + 1 "
+                "WHERE id = :id"
+            ),
+            {"id": str(media_id)},
+        )
+        await self.db.commit()
+
+    async def list_unoptimized_videos(
+        self, older_than_sec: int, limit: int, max_attempts: int
+    ) -> list[Media]:
         result = await self.db.execute(
             select(Media)
             .where(
                 Media.media_type == "video",
                 Media.optimized_at.is_(None),
+                Media.optimize_attempts < max_attempts,
                 Media.created_at < text("now() - make_interval(secs => :older_than_sec)"),
             )
             .order_by(Media.created_at)

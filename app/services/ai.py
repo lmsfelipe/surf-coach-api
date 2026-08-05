@@ -1,4 +1,5 @@
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -445,6 +446,9 @@ def normalise_scores(scores: ScoreRubric) -> dict[str, Decimal | None]:
 
 
 class ReviewService:
+    # Matches the worker sweeper's message (worker.SWEEP_MESSAGE).
+    STUCK_PROCESSING_MESSAGE = "Processing was interrupted."
+
     def __init__(
         self,
         sessions_repo: SessionsRepository,
@@ -605,13 +609,39 @@ class ReviewService:
             raise ReviewNotRetryableError()
         return await self.review_repo.reset_for_retry(review_id)
 
+    async def _fail_if_stale(self, review: Review) -> Review:
+        """Fail a review left in 'processing' past the stuck threshold.
+
+        The worker's sweeper normally does this, but it only runs inside the
+        worker process. If the worker is offline (yet Redis accepted the enqueue),
+        the job never runs and the sweeper never fires, so the row would stay
+        'processing' forever and the client would poll in an endless loop. This
+        read-path check is the worker-independent safety net that breaks it.
+        """
+        if review.status != "processing":
+            return review
+        started = review.processing_started_at or review.created_at
+        if started is None:
+            return review
+        if started.tzinfo is None:
+            started = started.replace(tzinfo=UTC)
+        age = (datetime.now(tz=UTC) - started).total_seconds()
+        if age <= self.settings.STUCK_JOB_THRESHOLD_SEC:
+            return review
+        logger.warning(
+            "Review stuck in processing; failing on read",
+            review_id=str(review.id),
+            age_sec=int(age),
+        )
+        return await self.review_repo.mark_failed(review.id, self.STUCK_PROCESSING_MESSAGE)
+
     async def get_review(self, review_id: UUID, user: AuthUser) -> Review:
         review = await self.review_repo.get(review_id)
         if review is None:
             raise NotFoundError("Review not found.")
         if review.profile_id != user.id:
             raise ForbiddenError()
-        return review
+        return await self._fail_if_stale(review)
 
     async def get_review_for_session(self, session_id: UUID, user: AuthUser) -> Review:
         session = await self.sessions_repo.get(session_id)
@@ -622,7 +652,7 @@ class ReviewService:
         review = await self.review_repo.get_for_session(session_id)
         if review is None:
             raise NotFoundError("Review not found for this session.")
-        return review
+        return await self._fail_if_stale(review)
 
     @staticmethod
     def _extract_key(url: str, user_id, session_id, media_id) -> str | None:

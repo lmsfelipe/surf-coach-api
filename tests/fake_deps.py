@@ -92,6 +92,7 @@ class FakeMediaRepo:
             file_name=kwargs["file_name"],
             file_size_bytes=kwargs.get("file_size_bytes"),
             duration_seconds=kwargs.get("duration_seconds"),
+            optimize_attempts=0,
             created_at=now,
         )
         self._store[media.id] = media
@@ -110,6 +111,7 @@ class FakeMediaRepo:
                 file_size_bytes=it.file_size_bytes,
                 duration_seconds=it.duration_seconds,
                 optimized_at=None,
+                optimize_attempts=0,
                 created_at=now,
             )
             self._store[media.id] = media
@@ -131,9 +133,20 @@ class FakeMediaRepo:
             media.optimized_at = datetime.now(tz=UTC)
             media.file_size_bytes = size_bytes
 
-    async def list_unoptimized_videos(self, older_than_sec: int, limit: int) -> list[Media]:
+    async def increment_optimize_attempts(self, media_id: UUID) -> None:
+        media = self._store.get(media_id)
+        if media:
+            media.optimize_attempts = (media.optimize_attempts or 0) + 1
+
+    async def list_unoptimized_videos(
+        self, older_than_sec: int, limit: int, max_attempts: int
+    ) -> list[Media]:
         return [
-            m for m in self._store.values() if m.media_type == "video" and m.optimized_at is None
+            m
+            for m in self._store.values()
+            if m.media_type == "video"
+            and m.optimized_at is None
+            and (m.optimize_attempts or 0) < max_attempts
         ][:limit]
 
 

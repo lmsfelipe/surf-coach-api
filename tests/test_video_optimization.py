@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 from unittest.mock import AsyncMock
 from uuid import uuid4
@@ -184,6 +185,57 @@ class TestOptimizeMediaTask:
 
         assert media.optimized_at is None
         assert storage.uploaded[key] == raw  # untouched
+        assert media.optimize_attempts == 1  # failure recorded so the sweep can give up
+
+    async def test_attempt_reserved_before_transcode(self, media_repo, storage, monkeypatch):
+        """The attempt is committed before ffmpeg runs, so a hard kill can't lose it."""
+        raw = b"x" * 100
+        media = await _make_video_media_async(media_repo, raw=raw)
+        key = _key_from_storage_url(media.storage_url, "surf-media")
+        storage.uploaded[key] = raw
+
+        seen = {}
+
+        class _RecordingTranscoder:
+            def __init__(self) -> None:
+                self.calls: list[int] = []
+
+            async def transcode(self, video_bytes: bytes) -> bytes:
+                seen["attempts_when_called"] = media.optimize_attempts
+                self.calls.append(len(video_bytes))
+                return b"small"
+
+        monkeypatch.setattr("app.worker.SessionLocal", lambda: AsyncMock())
+        monkeypatch.setattr("app.worker.MediaRepository", lambda db: media_repo)
+        monkeypatch.setattr("app.worker.get_storage_client", lambda: storage)
+        monkeypatch.setattr("app.worker.VideoTranscoder", _RecordingTranscoder)
+
+        await optimize_media_task({}, str(media.id))
+
+        # The increment landed before transcode was entered — the guarantee that
+        # survives an uncatchable SIGKILL mid-transcode.
+        assert seen["attempts_when_called"] == 1
+
+    async def test_defers_when_transcode_slot_busy(
+        self, media_repo, storage, transcoder, monkeypatch
+    ):
+        """A busy transcode gate skips the job (no work, no attempt burned)."""
+        media = await _make_video_media_async(media_repo)
+
+        monkeypatch.setattr("app.worker.SessionLocal", lambda: AsyncMock())
+        monkeypatch.setattr("app.worker.MediaRepository", lambda db: media_repo)
+        monkeypatch.setattr("app.worker.get_storage_client", lambda: storage)
+        monkeypatch.setattr("app.worker.VideoTranscoder", lambda: transcoder)
+
+        busy_gate = asyncio.Semaphore(1)
+        await busy_gate.acquire()  # fully occupied
+        monkeypatch.setattr("app.worker.get_optimize_gate", lambda: busy_gate)
+
+        await optimize_media_task({}, str(media.id))
+
+        assert len(transcoder.calls) == 0
+        assert media.optimized_at is None
+        assert media.optimize_attempts == 0  # deferral must not count as a failure
 
     async def test_disabled_flag_skips(self, media_repo, storage, transcoder, monkeypatch):
         media = await _make_video_media_async(media_repo)
@@ -284,7 +336,29 @@ class TestFakeMediaRepoOptimization:
             duration_seconds=None,
         )
 
-        rows = await repo.list_unoptimized_videos(older_than_sec=0, limit=100)
+        rows = await repo.list_unoptimized_videos(older_than_sec=0, limit=100, max_attempts=3)
         ids = [m.id for m in rows]
         assert v1.id in ids
         assert v2.id not in ids
+
+    async def test_list_unoptimized_videos_excludes_exhausted_attempts(self):
+        """A video that has failed too many times is no longer swept (poison-pill guard)."""
+        repo = FakeMediaRepo()
+        healthy = await _make_video_media_async(repo)
+        exhausted = await _make_video_media_async(repo)
+        exhausted.optimize_attempts = 3
+
+        rows = await repo.list_unoptimized_videos(older_than_sec=0, limit=100, max_attempts=3)
+        ids = [m.id for m in rows]
+        assert healthy.id in ids
+        assert exhausted.id not in ids
+
+    async def test_increment_optimize_attempts(self):
+        repo = FakeMediaRepo()
+        media = await _make_video_media_async(repo)
+        assert media.optimize_attempts == 0
+
+        await repo.increment_optimize_attempts(media.id)
+        await repo.increment_optimize_attempts(media.id)
+
+        assert media.optimize_attempts == 2

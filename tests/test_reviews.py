@@ -162,6 +162,45 @@ async def test_generate_review_marks_failed_when_enqueue_fails(client, review_ct
     assert body["errorMessage"] == reviews_api.ENQUEUE_FAILED_MESSAGE
 
 
+async def test_stale_processing_review_fails_on_read(client, review_ctx):
+    """Worker offline: a 'processing' review older than the stuck threshold is
+    failed when read, so the client's polling loop terminates instead of spinning
+    forever (the worker's sweeper cannot help — it runs inside the dead worker)."""
+    user_id = uuid4()
+    headers = {"Authorization": f"Bearer {_token(user_id)}"}
+    async with client as c:
+        session_id = await _create_session(c, user_id)
+        await _seed_media(review_ctx, UUID(session_id), user_id)
+        pending = await review_ctx["reviews"].create_pending(
+            session_id=UUID(session_id), profile_id=user_id
+        )
+        threshold = get_settings().STUCK_JOB_THRESHOLD_SEC
+        pending.processing_started_at = datetime.now(tz=UTC) - timedelta(seconds=threshold + 10)
+
+        r = await c.get(f"/api/v1/sessions/{session_id}/review", headers=headers)
+
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "failed"
+    assert body["errorMessage"] == ReviewService.STUCK_PROCESSING_MESSAGE
+
+
+async def test_fresh_processing_review_stays_processing_on_read(client, review_ctx):
+    """A recently-enqueued review is still within the threshold and must not be
+    failed prematurely — the worker may yet pick it up."""
+    user_id = uuid4()
+    headers = {"Authorization": f"Bearer {_token(user_id)}"}
+    async with client as c:
+        session_id = await _create_session(c, user_id)
+        await _seed_media(review_ctx, UUID(session_id), user_id)
+        await review_ctx["reviews"].create_pending(session_id=UUID(session_id), profile_id=user_id)
+
+        r = await c.get(f"/api/v1/sessions/{session_id}/review", headers=headers)
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "processing"
+
+
 async def test_process_review_completes_with_normalised_scores(review_ctx):
     """The worker path fills in narrative, tips and scores."""
     user_id = uuid4()

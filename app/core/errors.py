@@ -204,6 +204,15 @@ class InvalidMediaError(AppError):
     message = "Media file could not be processed."
 
 
+class MediaProcessingKilledError(InvalidMediaError):
+    """ffmpeg was killed by a signal (e.g. SIGKILL from the OOM killer) rather than
+    exiting on its own. Distinct from a genuinely corrupt file so logs make the
+    infra cause obvious. Subclasses InvalidMediaError so existing handling still applies."""
+
+    code = "MEDIA_PROCESSING_KILLED"
+    message = "Media processing was interrupted before it could finish."
+
+
 class MediaNotSurfRelatedError(AppError):
     code = "MEDIA_NOT_SURF_RELATED"
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT

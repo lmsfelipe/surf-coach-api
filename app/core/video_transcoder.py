@@ -1,13 +1,31 @@
 import asyncio
 import os
+import signal
 import tempfile
 
 import structlog
 
 from app.core.config import get_settings
-from app.core.errors import InvalidMediaError
+from app.core.errors import InvalidMediaError, MediaProcessingKilledError
 
 logger = structlog.get_logger(__name__)
+
+_optimize_gate: asyncio.Semaphore | None = None
+
+
+def get_optimize_gate() -> asyncio.Semaphore:
+    """Process-wide cap on concurrent transcodes.
+
+    ffmpeg holds whole decoded frames in memory; running several at once exhausts
+    the container's RAM and the OOM killer sends SIGKILL (surfacing as the classic
+    ``ffmpeg exited -9``). Sized by VIDEO_OPTIMIZE_CONCURRENCY (default 1) and kept
+    separate from WORKER_MAX_JOBS so it throttles only optimization, never reviews.
+    Created lazily so it binds to the worker's running event loop.
+    """
+    global _optimize_gate
+    if _optimize_gate is None:
+        _optimize_gate = asyncio.Semaphore(get_settings().VIDEO_OPTIMIZE_CONCURRENCY)
+    return _optimize_gate
 
 
 class VideoTranscoder:
@@ -55,7 +73,18 @@ class VideoTranscoder:
             )
             _, stderr = await proc.communicate()
             if proc.returncode != 0:
-                raise InvalidMediaError(f"ffmpeg exited {proc.returncode}: {stderr.decode()[:300]}")
+                detail = stderr.decode()[:300]
+                if proc.returncode < 0:
+                    # Negative return code = killed by a signal; SIGKILL (-9) is
+                    # almost always the OOM killer, an infra problem, not a bad file.
+                    try:
+                        sig = signal.Signals(-proc.returncode).name
+                    except ValueError:
+                        sig = f"signal {-proc.returncode}"
+                    raise MediaProcessingKilledError(
+                        f"ffmpeg killed by {sig} (likely out of memory): {detail}"
+                    )
+                raise InvalidMediaError(f"ffmpeg exited {proc.returncode}: {detail}")
 
             with open(out_path, "rb") as f:
                 return f.read()

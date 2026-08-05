@@ -12,7 +12,7 @@ from app.core.config import get_settings
 from app.core.db import SessionLocal
 from app.core.frame_extractor import FrameExtractor
 from app.core.storage import get_storage_client
-from app.core.video_transcoder import VideoTranscoder
+from app.core.video_transcoder import VideoTranscoder, get_optimize_gate
 from app.repositories.ai import ReviewRepository, TrainingPlanRepository
 from app.repositories.auth import AuthRepository
 from app.repositories.media import MediaRepository
@@ -175,15 +175,33 @@ async def optimize_media_task(ctx: dict, media_id: str) -> None:
             logger.warning("optimize: could not derive key for media %s", media_id)
             return
 
-        raw = await asyncio.to_thread(storage.download, key)
-        compressed = await VideoTranscoder().transcode(raw)
-
-        if len(compressed) >= len(raw):
-            await media_repo.mark_optimized(media.id, len(raw))
+        gate = get_optimize_gate()
+        if gate.locked():
+            # All transcode slots are busy. Skip instead of blocking a worker slot
+            # (which would hold the raw video in memory and could starve reviews);
+            # the next sweep re-enqueues this video. Not counted as an attempt.
+            logger.info("optimize: media %s deferred; transcode slot busy", media_id)
             return
 
-        await asyncio.to_thread(storage.upload, key, compressed, "video/mp4")
-        await media_repo.mark_optimized(media.id, len(compressed))
+        async with gate:
+            # Reserve the attempt up front: commit the increment BEFORE downloading or
+            # running ffmpeg. A transcode heavy enough to OOM the container is killed
+            # with SIGKILL, which no except/finally can catch — so if we counted the
+            # attempt only on caught failure, such a video would never advance its
+            # counter and would be re-enqueued forever. Committing first means the
+            # count survives even a hard kill, so the poison-pill guard still trips.
+            await media_repo.increment_optimize_attempts(media.id)
+
+            raw = await asyncio.to_thread(storage.download, key)
+            compressed = await VideoTranscoder().transcode(raw)
+
+            if len(compressed) >= len(raw):
+                await media_repo.mark_optimized(media.id, len(raw))
+                return
+
+            await asyncio.to_thread(storage.upload, key, compressed, "video/mp4")
+            await media_repo.mark_optimized(media.id, len(compressed))
+
         logger.info(
             "optimize: media %s %d -> %d bytes (-%.0f%%)",
             media_id,
@@ -192,6 +210,8 @@ async def optimize_media_task(ctx: dict, media_id: str) -> None:
             100 * (1 - len(compressed) / len(raw)),
         )
     except Exception:
+        # The attempt was already reserved above, so a caught failure needs no extra
+        # bookkeeping — just leave the raw object untouched for a possible retry.
         logger.exception("optimize: media %s failed; raw left intact", media_id)
     finally:
         await db.close()
@@ -208,6 +228,7 @@ async def sweep_unoptimized_media(ctx: dict) -> None:
         rows = await repo.list_unoptimized_videos(
             older_than_sec=settings.VIDEO_OPTIMIZE_GRACE_SEC,
             limit=settings.VIDEO_OPTIMIZE_BATCH,
+            max_attempts=settings.VIDEO_OPTIMIZE_MAX_ATTEMPTS,
         )
         for m in rows:
             await ctx["redis"].enqueue_job("optimize_media_task", str(m.id))
@@ -226,7 +247,8 @@ class WorkerSettings:
         cron(
             sweep_unoptimized_media,
             minute={0, 5, 10, 15, 20, 25, 30, 35, 40, 45, 50, 55},
-            run_at_startup=True,
+            # No run_at_startup: a crash-restart must not instantly re-enqueue a full
+            # batch — that turns an OOM into a self-amplifying enqueue storm.
         ),
     ]
     redis_settings = RedisSettings.from_dsn(get_settings().REDIS_URL)

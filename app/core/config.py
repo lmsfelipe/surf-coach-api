@@ -72,7 +72,7 @@ class Settings(BaseSettings):
         ),
     )
     STUCK_JOB_THRESHOLD_SEC: int = Field(
-        default=600,
+        default=300,
         description=(
             "Sweeper marks processing rows older than this as failed (s); must "
             "exceed job timeout + worst-case queue wait"
@@ -109,6 +109,22 @@ class Settings(BaseSettings):
         default=900, description="Delay after upload before compressing (s)"
     )
     VIDEO_OPTIMIZE_BATCH: int = Field(default=20, description="Max videos enqueued per sweep tick")
+    VIDEO_OPTIMIZE_CONCURRENCY: int = Field(
+        default=1,
+        description=(
+            "Max simultaneous ffmpeg transcodes across the worker. ffmpeg is memory-heavy; "
+            "running several at once OOM-kills the container. Independent of WORKER_MAX_JOBS "
+            "so it never throttles reviews — optimize jobs that can't get a slot defer to the "
+            "next sweep instead of blocking."
+        ),
+    )
+    VIDEO_OPTIMIZE_MAX_ATTEMPTS: int = Field(
+        default=3,
+        description=(
+            "Give up optimizing a video after this many failed attempts. Stops a "
+            "permanently-failing (corrupt or too-large) video from being re-enqueued forever."
+        ),
+    )
 
     @property
     def is_development(self) -> bool:
