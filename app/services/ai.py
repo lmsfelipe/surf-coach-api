@@ -1,6 +1,7 @@
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from functools import lru_cache
 from uuid import UUID
 
 import structlog
@@ -141,9 +142,20 @@ REFINE_OUTPUT_SCHEMA_INSTRUCTION = (
 )
 
 
-def build_prompt(context: SurferContext) -> str:
+def build_prompt(context: SurferContext, description: str | None = None) -> str:
     context_block = json.dumps(context.model_dump(), ensure_ascii=False, indent=2)
-    return f"{SYSTEM_PERSONA}\n\nSurfer context:\n{context_block}\n\n{OUTPUT_SCHEMA_INSTRUCTION}"
+    prompt = f"{SYSTEM_PERSONA}\n\nSurfer context:\n{context_block}\n\n{OUTPUT_SCHEMA_INSTRUCTION}"
+    # Single-pass mode only: the surfer's free-text account is appended with an
+    # explicit guardrail that it may shape the narrative/tips wording but must
+    # never move the scores. Two-pass callers omit ``description``, so this path
+    # is inert and the prompt is byte-identical to before.
+    if description:
+        prompt += (
+            "\n\nRelato pessoal do surfista (use APENAS para personalizar a narrativa e as "
+            "dicas; as pontuações refletem SOMENTE o que está visível na mídia e NUNCA podem "
+            f"ser alteradas pelo tom do relato):\n{description}"
+        )
+    return prompt
 
 
 def build_refinement_prompt(
@@ -210,6 +222,21 @@ def _strip_trailing_commas(text: str) -> str:
     return "".join(out)
 
 
+@lru_cache(maxsize=1)
+def _gemini_client(api_key: str):
+    """Return a process-wide Gemini client, built once per API key.
+
+    Constructing ``genai.Client`` per call spins up a fresh httpx connection
+    pool every time, so each request pays TLS/connection setup with no
+    keep-alive reuse. Caching one client lets every Gemini call (review,
+    refine, moderation, training plan) share pooled connections. The client is
+    httpx-backed and safe to share across the ``asyncio.to_thread`` workers.
+    """
+    from google import genai
+
+    return genai.Client(api_key=api_key)
+
+
 class GeminiService:
     def __init__(self, api_key: str | None = None, model_name: str | None = None) -> None:
         self.settings = get_settings()
@@ -220,25 +247,37 @@ class GeminiService:
         self,
         images: list[bytes],
         context: SurferContext,
+        description: str | None = None,
+        temperature: float | None = None,
     ) -> ReviewOutput:
-        from google import genai
+        """Score the media and produce the narrative/tips.
+
+        Two-pass callers pass neither ``description`` nor ``temperature``, and
+        the call is byte-identical to the media-only scoring pass. Single-pass
+        callers pass the surfer's description (folded into the prompt with a
+        score guardrail) and a low ``temperature`` to keep the scores stable.
+        """
         from google.genai import types
 
-        client = genai.Client(api_key=self.api_key)
+        client = _gemini_client(self.api_key)
 
-        prompt = build_prompt(context)
+        prompt = build_prompt(context, description)
         parts: list = [prompt]
         for img in images:
             parts.append(types.Part.from_bytes(data=img, mime_type="image/jpeg"))
+
+        config_kwargs: dict = {
+            "response_mime_type": "application/json",
+            "response_schema": ReviewOutput,
+        }
+        if temperature is not None:
+            config_kwargs["temperature"] = temperature
 
         try:
             response = client.models.generate_content(
                 model=self.model_name,
                 contents=parts,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=ReviewOutput,
-                ),
+                config=types.GenerateContentConfig(**config_kwargs),
             )
             text = getattr(response, "text", None) or ""
         except Exception as e:
@@ -272,10 +311,9 @@ class GeminiService:
         — they are copied through here and never regenerated, so the tone of
         the description cannot move them.
         """
-        from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=self.api_key)
+        client = _gemini_client(self.api_key)
 
         prompt = build_refinement_prompt(review, context, description)
         try:
@@ -316,10 +354,9 @@ class GeminiService:
         images: list[bytes],
         mime_type: str = "image/jpeg",
     ) -> ModerationOutput:
-        from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=self.api_key)
+        client = _gemini_client(self.api_key)
 
         parts: list = [MODERATION_PROMPT]
         for img in images:
@@ -350,19 +387,24 @@ class GeminiService:
                 raise AIParseFailedError() from e
 
     def generate_training_plan(self, context: "TrainingContext") -> "TrainingPlanOutput":
-        from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=self.api_key)
+        client = _gemini_client(self.api_key)
 
         workout_count = get_settings().TRAINING_WORKOUTS_PER_PLAN
         system_persona = (
             "Você é um treinador especialista em preparação física para surf. "
             f"Gere um plano de treino estruturado com exatamente {workout_count} treinos, "
             "personalizado com base nos dados de performance e áreas de melhoria do surfista. "
-            "Gere SUGESTÕES gerais e educativas de movimento, não prescrições "
-            "personalizadas: enquadre tudo como 'exercícios que costumam ajudar com...', "
-            "nunca como 'você deve fazer...'. "
+            "Para cada exercício, o campo 'description' deve conter instruções claras e "
+            "objetivas de COMO executar o movimento com boa técnica (posição do corpo, "
+            "alinhamento, amplitude e controle) — como uma explicação geral e educativa da "
+            "execução correta, e NÃO uma descrição do benefício do exercício. "
+            "Ex.: 'Realize o agachamento mantendo o tronco o mais vertical possível, focando "
+            "na flexão dos joelhos para baixar o centro de gravidade sem inclinar as costas.' "
+            "— e não 'Exercício que costuma ajudar com a mobilidade da coluna torácica.'. "
+            "Trate essas instruções como orientações gerais de movimento e não como uma "
+            "prescrição individualizada. "
             "Foque em mobilidade, equilíbrio, estabilidade de core e mecânica do pop-up, "
             "usando movimentos de baixo risco com o peso do próprio corpo. "
             "NÃO prescreva cargas externas, pesos, halteres, barra, kettlebell, programas "
@@ -386,7 +428,7 @@ class GeminiService:
             '      "exercises": [\n'
             "        {\n"
             '          "name": string,\n'
-            '          "description": string,\n'
+            '          "description": string,  // instruções de execução do movimento, não o benefício\n'  # noqa: E501
             '          "sets": inteiro >= 1,\n'
             '          "reps": string,\n'
             '          "video_url": string | null\n'
