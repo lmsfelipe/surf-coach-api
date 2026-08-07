@@ -1,4 +1,6 @@
 import json
+import random
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from functools import lru_cache
@@ -84,10 +86,7 @@ SYSTEM_PERSONA = (
     "Forneça feedback estruturado e acionável calibrado ao nível de habilidade do surfista. "
     "IMPORTANTE: avalie SOMENTE o que está visível nas mídias fornecidas. "
     "Se um aspecto técnico (ex: drop, manobra, uso dos braços) não aparecer nas imagens, "
-    "não invente uma avaliação — retorne null na pontuação correspondente. "
-    "O tamanho da onda informado no contexto está em METROS (altura da face da onda). "
-    "Ao mencionar o tamanho da onda, use sempre o valor em metros exatamente como fornecido "
-    "e NUNCA o converta para pés."
+    "não invente uma avaliação — retorne null na pontuação correspondente."
 )
 
 OUTPUT_SCHEMA_INSTRUCTION = (
@@ -128,8 +127,7 @@ REFINE_PERSONA = (
     "por exemplo, reconhecendo as sensações, dúvidas ou objetivos que o surfista mencionou. "
     "NUNCA deixe o tom do relato (otimista ou pessimista) mudar a sua avaliação técnica: "
     "ela reflete apenas o que foi observado nas mídias, e as pontuações permanecem inalteradas. "
-    "Não contradiga a evidência visual. Mantenha exatamente 3 dicas acionáveis. "
-    "O tamanho da onda está em METROS: ao mencioná-lo, use sempre metros e NUNCA converta para pés."
+    "Não contradiga a evidência visual. Mantenha exatamente 3 dicas acionáveis."
 )
 
 REFINE_OUTPUT_SCHEMA_INSTRUCTION = (
@@ -237,6 +235,98 @@ def _gemini_client(api_key: str):
     return genai.Client(api_key=api_key)
 
 
+_RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+_RETRYABLE_EXC_NAMES = frozenset(
+    {
+        "ServerError",  # google.genai.errors.ServerError (5xx)
+        "ConnectError",
+        "ConnectTimeout",
+        "ReadError",
+        "ReadTimeout",
+        "WriteError",
+        "WriteTimeout",
+        "PoolTimeout",
+        "RemoteProtocolError",  # stale keep-alive socket closed by the peer
+        "TransportError",
+        "ConnectionError",
+    }
+)
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """True for transient Gemini failures worth retrying.
+
+    Covers overload/rate-limit responses (HTTP 429 and 5xx, carried on the
+    google-genai error's ``code``) and connection-level errors — including the
+    stale pooled sockets that come with reusing a keep-alive client. Wrapped
+    causes are followed. Non-transient errors (bad request, auth) return False.
+    """
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if isinstance(code, int) and code in _RETRYABLE_STATUS:
+        return True
+    if type(exc).__name__ in _RETRYABLE_EXC_NAMES:
+        return True
+    cause = exc.__cause__ or exc.__context__
+    if cause is not None and cause is not exc:
+        return _is_retryable(cause)
+    return False
+
+
+def _generate_content_with_retry(
+    client,
+    *,
+    model: str,
+    contents,
+    config,
+    max_attempts: int,
+    base_delay: float,
+):
+    """Call ``generate_content`` with exponential backoff on transient errors.
+
+    This runs inside ``asyncio.to_thread`` (every caller is a sync method
+    dispatched off the event loop), so the blocking ``time.sleep`` between
+    attempts does not stall the loop. Non-retryable errors propagate immediately.
+    """
+    attempts = max(1, max_attempts)
+    for attempt in range(1, attempts + 1):
+        try:
+            return client.models.generate_content(model=model, contents=contents, config=config)
+        except Exception as exc:  # noqa: BLE001 — re-raised below when not retryable
+            if attempt >= attempts or not _is_retryable(exc):
+                raise
+            delay = base_delay * (2 ** (attempt - 1))
+            delay += random.uniform(0, delay * 0.25)  # jitter to avoid synchronised retries
+            logger.warning(
+                "Gemini call failed; retrying",
+                attempt=attempt,
+                max_attempts=attempts,
+                retry_in_sec=round(delay, 2),
+                error=str(exc),
+            )
+            time.sleep(delay)
+
+
+def _thinking_config(level: str):
+    """Build a ThinkingConfig for the configured thinking level, or None.
+
+    Gemini 3.x models think at MEDIUM by default; lowering to LOW/MINIMAL cuts
+    latency for structured tasks like scoring. ``thinking_level`` is only valid
+    for 3.x models, so an empty or unknown level yields None — safe to pass
+    through to any model (``thinking_config=None`` is a no-op) and correct for
+    2.x models, which do not support it.
+    """
+    normalized = (level or "").strip().upper()
+    if not normalized:
+        return None
+    from google.genai import types
+
+    try:
+        return types.ThinkingConfig(thinking_level=types.ThinkingLevel[normalized])
+    except KeyError:
+        logger.warning("Unknown GEMINI_THINKING_LEVEL; using model default", level=level)
+        return None
+
+
 class GeminiService:
     def __init__(self, api_key: str | None = None, model_name: str | None = None) -> None:
         self.settings = get_settings()
@@ -272,12 +362,16 @@ class GeminiService:
         }
         if temperature is not None:
             config_kwargs["temperature"] = temperature
+        config_kwargs["thinking_config"] = _thinking_config(self.settings.GEMINI_THINKING_LEVEL)
 
         try:
-            response = client.models.generate_content(
+            response = _generate_content_with_retry(
+                client,
                 model=self.model_name,
                 contents=parts,
                 config=types.GenerateContentConfig(**config_kwargs),
+                max_attempts=self.settings.GEMINI_MAX_ATTEMPTS,
+                base_delay=self.settings.GEMINI_RETRY_BASE_DELAY_SEC,
             )
             text = getattr(response, "text", None) or ""
         except Exception as e:
@@ -317,13 +411,17 @@ class GeminiService:
 
         prompt = build_refinement_prompt(review, context, description)
         try:
-            response = client.models.generate_content(
+            response = _generate_content_with_retry(
+                client,
                 model=self.model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=NarrativeRefinement,
+                    thinking_config=_thinking_config(self.settings.GEMINI_THINKING_LEVEL),
                 ),
+                max_attempts=self.settings.GEMINI_MAX_ATTEMPTS,
+                base_delay=self.settings.GEMINI_RETRY_BASE_DELAY_SEC,
             )
             text = getattr(response, "text", None) or ""
         except Exception as e:
@@ -363,13 +461,17 @@ class GeminiService:
             parts.append(types.Part.from_bytes(data=img, mime_type=mime_type))
 
         try:
-            response = client.models.generate_content(
+            response = _generate_content_with_retry(
+                client,
                 model=self.model_name,
                 contents=parts,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=ModerationOutput,
+                    thinking_config=_thinking_config(self.settings.GEMINI_THINKING_LEVEL),
                 ),
+                max_attempts=self.settings.GEMINI_MAX_ATTEMPTS,
+                base_delay=self.settings.GEMINI_RETRY_BASE_DELAY_SEC,
             )
             raw_text = getattr(response, "text", None) or ""
         except Exception as e:
@@ -443,13 +545,17 @@ class GeminiService:
         prompt = f"{system_persona}\n\nSurfer context:\n{context_block}\n\n{output_schema}"
 
         try:
-            response = client.models.generate_content(
+            response = _generate_content_with_retry(
+                client,
                 model=self.model_name,
                 contents=prompt,
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=TrainingPlanOutput,
+                    thinking_config=_thinking_config(self.settings.GEMINI_THINKING_LEVEL),
                 ),
+                max_attempts=self.settings.GEMINI_MAX_ATTEMPTS,
+                base_delay=self.settings.GEMINI_RETRY_BASE_DELAY_SEC,
             )
             raw_text = getattr(response, "text", None) or ""
         except Exception as e:
@@ -587,32 +693,51 @@ class ReviewService:
         context = SurferContext(
             skill_level=skill_level,
             location=session.location,
-            wave_conditions=f"{session.wave_size} metros",
+            wave_conditions=f"{session.wave_size} m",
             board_type=board_type,
         )
 
-        # Pass 1 — score the media in isolation. The surfer's description is
-        # deliberately kept out of this call so its tone cannot bias the scores.
-        review_output = await asyncio.to_thread(self.gemini.analyze_surf_media, all_frames, context)
-
-        # Pass 2 — personalise the narrative/tips with the surfer's description.
-        # Scores are locked to pass 1 (see refine_review_with_description). This
-        # is best-effort: if it fails we keep the media-only review rather than
-        # failing the whole job.
         description = (session.notes or "").strip()
-        if description:
-            try:
-                review_output = await asyncio.to_thread(
-                    self.gemini.refine_review_with_description,
-                    review_output,
-                    context,
-                    description,
-                )
-            except (AIGenerationFailedError, AIParseFailedError):
-                logger.warning(
-                    "Description refinement failed; keeping media-only review",
-                    review_id=str(review_id),
-                )
+
+        if self.settings.SINGLE_PASS_REVIEW:
+            # Single-pass (behind a flag, default OFF): media + description in one
+            # Gemini call. build_prompt guards the scores as media-only and a low
+            # temperature keeps them stable, but the description is now visible to
+            # the scoring context — an instructional guarantee, not the structural
+            # isolation the two-pass path below provides. Kept off in production
+            # until score-bias validation confirms the description does not move
+            # the scores.
+            review_output = await asyncio.to_thread(
+                self.gemini.analyze_surf_media,
+                all_frames,
+                context,
+                description or None,
+                self.settings.GEMINI_TEMPERATURE,
+            )
+        else:
+            # Pass 1 — score the media in isolation. The surfer's description is
+            # deliberately kept out of this call so its tone cannot bias the scores.
+            review_output = await asyncio.to_thread(
+                self.gemini.analyze_surf_media, all_frames, context
+            )
+
+            # Pass 2 — personalise the narrative/tips with the surfer's description.
+            # Scores are locked to pass 1 (see refine_review_with_description). This
+            # is best-effort: if it fails we keep the media-only review rather than
+            # failing the whole job.
+            if description:
+                try:
+                    review_output = await asyncio.to_thread(
+                        self.gemini.refine_review_with_description,
+                        review_output,
+                        context,
+                        description,
+                    )
+                except (AIGenerationFailedError, AIParseFailedError):
+                    logger.warning(
+                        "Description refinement failed; keeping media-only review",
+                        review_id=str(review_id),
+                    )
 
         if len(review_output.improvement_tips) != 3:
             tips = list(review_output.improvement_tips)

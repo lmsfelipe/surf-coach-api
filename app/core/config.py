@@ -30,6 +30,37 @@ class Settings(BaseSettings):
 
     GEMINI_API_KEY: str = Field(..., description="Gemini Vision API key")
     GEMINI_MODEL: str = Field(default="gemini-2.0-flash", description="Gemini model version")
+    SINGLE_PASS_REVIEW: bool = Field(
+        default=False,
+        description=(
+            "Generate the review in one Gemini call (media + description together) "
+            "instead of the two-pass media-then-refine flow. Keep OFF until score-bias "
+            "validation confirms the description does not move the scores."
+        ),
+    )
+    GEMINI_TEMPERATURE: float = Field(
+        default=0.2,
+        description="Sampling temperature for the single-pass review call (score stability).",
+    )
+    GEMINI_MAX_ATTEMPTS: int = Field(
+        default=3,
+        description=(
+            "Total attempts per Gemini call (1 = no retry). Retries transient 503 "
+            "overloads and dropped keep-alive connections with exponential backoff."
+        ),
+    )
+    GEMINI_RETRY_BASE_DELAY_SEC: float = Field(
+        default=0.5, description="Base backoff delay between Gemini retry attempts (seconds)."
+    )
+    GEMINI_THINKING_LEVEL: str = Field(
+        default="",
+        description=(
+            "Thinking level for Gemini 3.x calls: MINIMAL, LOW, MEDIUM, or HIGH. 3.x "
+            "models think at MEDIUM by default; LOW cuts latency for structured tasks "
+            "like scoring. Leave empty to keep the model default (required for 2.x "
+            "models, which do not support thinking_level)."
+        ),
+    )
     FRAME_EXTRACT_COUNT: int = Field(default=6, description="Frames sampled per video")
     MAX_UPLOAD_SIZE_MB: int = Field(default=100, description="Per-file upload size cap (MB)")
     MAX_UPLOAD_FILES: int = Field(
