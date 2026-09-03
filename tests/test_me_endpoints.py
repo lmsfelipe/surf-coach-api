@@ -8,48 +8,22 @@ from jose import jwt
 from app.api import auth as auth_api
 from app.core.config import get_settings
 from app.main import app
-from app.models.profile import Profile
 from app.services.auth import AuthService
+from tests.fake_deps import FakeAuthRepo
 
 
-class _FakeRepo:
-    def __init__(self) -> None:
-        self._store: dict[UUID, Profile] = {}
+@pytest.fixture(autouse=True)
+def _override_auth_service():
+    """Scope the override to each test.
 
-    async def ensure_dev_auth_user(self, user_id: UUID, email: str) -> None:
-        return None
-
-    async def get_profile(self, user_id: UUID) -> Profile | None:
-        return self._store.get(user_id)
-
-    async def create_profile(self, user_id: UUID, *, surf_level: str = "beginner") -> Profile:
-        now = datetime.now(tz=UTC)
-        profile = Profile(
-            id=user_id,
-            surf_level=surf_level,
-            height_cm=None,
-            weight_kg=None,
-            created_at=now,
-            updated_at=now,
-        )
-        self._store[user_id] = profile
-        return profile
-
-    async def update_profile(self, profile: Profile, fields: dict) -> Profile:
-        for k, v in fields.items():
-            setattr(profile, k, v)
-        profile.updated_at = datetime.now(tz=UTC)
-        return profile
-
-
-_FAKE_REPO = _FakeRepo()
-
-
-def _fake_service() -> AuthService:
-    return AuthService(_FAKE_REPO)  # type: ignore[arg-type]
-
-
-app.dependency_overrides[auth_api.get_auth_service] = _fake_service
+    Installing it at import time would leak the fake into every module that
+    pytest collects afterwards, and a module-level repo instance would let one
+    test's profile survive into the next.
+    """
+    repo = FakeAuthRepo()
+    app.dependency_overrides[auth_api.get_auth_service] = lambda: AuthService(repo)  # type: ignore[arg-type]
+    yield
+    app.dependency_overrides.pop(auth_api.get_auth_service, None)
 
 
 def _token(user_id: UUID, email: str = "surfer@example.com") -> str:

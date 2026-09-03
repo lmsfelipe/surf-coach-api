@@ -31,6 +31,7 @@ dependencies = [
 dev = [
     "pytest>=8.2",
     "pytest-asyncio>=0.23",
+    "pytest-cov>=5.0",
     "ruff>=0.5",
 ]
 
@@ -58,3 +59,24 @@ ignore = ["B008"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.coverage.run]
+source = ["app"]
+branch = true
+omit = [
+    # Import-time wiring with no branching logic of its own.
+    "app/models/*",
+    "app/schemas/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+# Ratchet: raise this as coverage improves, never lower it to make a build pass.
+fail_under = 85
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "\\.\\.\\.$",
+]

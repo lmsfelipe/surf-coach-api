@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -12,6 +12,7 @@ from app.models.media import Media
 from app.models.profile import Profile
 from app.models.review import Review
 from app.models.session import Session
+from app.models.surfboard import Surfboard
 from app.models.training_plan import TrainingPlan
 from app.models.workout import Workout
 
@@ -254,10 +255,49 @@ class FakeReviewRepo:
 
 class FakeSurfboardRepo:
     def __init__(self) -> None:
-        self._store: dict[UUID, object] = {}
+        self._store: dict[UUID, Surfboard] = {}
 
-    async def get_by_id(self, surfboard_id: UUID):
+    async def get_by_id(self, surfboard_id: UUID) -> Surfboard | None:
         return self._store.get(surfboard_id)
+
+    async def get_all_by_profile(self, profile_id: UUID) -> list[Surfboard]:
+        items = [b for b in self._store.values() if b.profile_id == profile_id]
+        items.sort(key=lambda b: b.created_at, reverse=True)
+        return items
+
+    async def create(
+        self,
+        *,
+        profile_id: UUID,
+        board_type: str,
+        board_size: float,
+        volume: float | None,
+        label: str | None,
+    ) -> Surfboard:
+        # Distinct created_at per row so the repo's DESC ordering is observable;
+        # rows written in the same clock tick would otherwise sort arbitrarily.
+        now = datetime.now(tz=UTC) + timedelta(microseconds=len(self._store))
+        board = Surfboard(
+            id=uuid4(),
+            profile_id=profile_id,
+            board_type=board_type,
+            board_size=board_size,
+            volume=volume,
+            label=label,
+            created_at=now,
+            updated_at=now,
+        )
+        self._store[board.id] = board
+        return board
+
+    async def update(self, board: Surfboard, fields: dict) -> Surfboard:
+        for key, value in fields.items():
+            setattr(board, key, value)
+        board.updated_at = datetime.now(tz=UTC)
+        return board
+
+    async def delete(self, board: Surfboard) -> None:
+        self._store.pop(board.id, None)
 
 
 class FakeArqPool:

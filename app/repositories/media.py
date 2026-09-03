@@ -96,9 +96,7 @@ class MediaRepository:
         """Record one failed optimization attempt so the sweep can eventually give up."""
         await self.db.execute(
             text(
-                "UPDATE public.media "
-                "SET optimize_attempts = optimize_attempts + 1 "
-                "WHERE id = :id"
+                "UPDATE public.media SET optimize_attempts = optimize_attempts + 1 WHERE id = :id"
             ),
             {"id": str(media_id)},
         )

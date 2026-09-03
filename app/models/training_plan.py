@@ -41,5 +41,13 @@ class TrainingPlan(Base):
     )
 
     workouts: Mapped[list["Workout"]] = relationship(  # noqa: F821
-        "Workout", back_populates="plan", order_by="Workout.sequence_number"
+        "Workout",
+        back_populates="plan",
+        order_by="Workout.sequence_number",
+        # workouts.plan_id is NOT NULL with ON DELETE CASCADE. Without these,
+        # deleting a plan whose workouts are loaded makes the ORM try to orphan
+        # them (UPDATE workouts SET plan_id = NULL), which the NOT NULL
+        # constraint rejects. passive_deletes hands the cascade to the database.
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )

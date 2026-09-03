@@ -34,5 +34,11 @@ class Workout(Base):
         "TrainingPlan", back_populates="workouts"
     )
     exercises: Mapped[list["Exercise"]] = relationship(  # noqa: F821
-        "Exercise", back_populates="workout", order_by="Exercise.sequence_number"
+        "Exercise",
+        back_populates="workout",
+        order_by="Exercise.sequence_number",
+        # Same reasoning as TrainingPlan.workouts: exercises.workout_id is
+        # NOT NULL with ON DELETE CASCADE, so the database owns the cascade.
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )

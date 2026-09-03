@@ -134,8 +134,16 @@ class TrainingPlanRepository:
         self.db = db
 
     def _eager_query(self):
-        return select(TrainingPlan).options(
-            selectinload(TrainingPlan.workouts).selectinload(Workout.exercises)
+        # populate_existing is required, not cosmetic: the mutating methods below
+        # commit and then re-read to return a fully-populated plan. The session
+        # is built with expire_on_commit=False, so without this the identity map
+        # hands back the instance loaded *before* the write — a plan whose
+        # `workouts` collection is still the empty one from create_pending, even
+        # though the rows were inserted correctly.
+        return (
+            select(TrainingPlan)
+            .options(selectinload(TrainingPlan.workouts).selectinload(Workout.exercises))
+            .execution_options(populate_existing=True)
         )
 
     async def get_by_id(self, plan_id: UUID) -> TrainingPlan | None:
