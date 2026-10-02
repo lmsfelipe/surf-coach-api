@@ -10,12 +10,14 @@ from uuid import uuid4
 
 import pytest
 
+from app.core.config import get_settings
 from app.core.errors import (
     ExplicitContentError,
     FileTooLargeError,
     ForbiddenError,
     InvalidMediaTypeError,
     MediaNotSurfRelatedError,
+    MixedMediaTypesError,
     NotFoundError,
     TooFewPhotosError,
     TooManyFilesError,
@@ -25,7 +27,7 @@ from app.core.errors import (
 )
 from app.core.security.jwt import AuthUser
 from app.core.upload import SpooledUpload
-from app.services.media import MAX_PHOTOS, MAX_VIDEOS, MIN_PHOTOS, MediaService
+from app.services.media import MediaService
 from tests.fake_deps import (
     FakeFrameExtractor,
     FakeGeminiService,
@@ -68,6 +70,24 @@ def ctx():
         "frames": FakeFrameExtractor(duration=10.0),
         "gemini": FakeGeminiService(None),
     }
+
+
+@pytest.fixture
+def photo_limits(monkeypatch):
+    """Rebind MIN_UPLOAD_PHOTOS/MAX_UPLOAD_PHOTOS for one test.
+
+    MediaService reads get_settings() in __init__, so this must run before
+    build_service(); the cache is cleared on both sides so neither the test nor
+    its neighbours see a stale Settings.
+    """
+
+    def _apply(*, min_photos: int, max_photos: int) -> None:
+        monkeypatch.setenv("MIN_UPLOAD_PHOTOS", str(min_photos))
+        monkeypatch.setenv("MAX_UPLOAD_PHOTOS", str(max_photos))
+        get_settings.cache_clear()
+
+    yield _apply
+    get_settings.cache_clear()
 
 
 def build_service(ctx) -> MediaService:
@@ -116,33 +136,54 @@ def test_exactly_the_cap_is_still_accepted(ctx):
     service.validate_file_count(service.settings.MAX_UPLOAD_FILES)
 
 
-def test_a_lone_photo_is_rejected_as_too_few(ctx):
-    """Photo reviews need a minimum set; one frame is not a session."""
-    with pytest.raises(TooFewPhotosError):
-        build_service(ctx).validate_upload_counts([JPEG_HEADER])
-
-
-def test_just_under_the_photo_minimum_is_rejected(ctx):
-    with pytest.raises(TooFewPhotosError):
-        build_service(ctx).validate_upload_counts([JPEG_HEADER] * (MIN_PHOTOS - 1))
-
-
-def test_exactly_the_photo_minimum_is_accepted(ctx):
-    build_service(ctx).validate_upload_counts([JPEG_HEADER] * MIN_PHOTOS)
-
-
-def test_too_many_photos_is_rejected(ctx):
+def test_shipped_defaults_allow_one_to_ten_photos(ctx):
+    """The product rule is at least one photo per review, at most ten."""
+    service = build_service(ctx)
+    assert service.settings.MIN_UPLOAD_PHOTOS == 1
+    assert service.settings.MAX_UPLOAD_PHOTOS == 10
+    service.validate_upload_counts([JPEG_HEADER])
+    service.validate_upload_counts([JPEG_HEADER] * 10)
     with pytest.raises(TooManyPhotosError):
-        build_service(ctx).validate_upload_counts([JPEG_HEADER] * (MAX_PHOTOS + 1))
+        service.validate_upload_counts([JPEG_HEADER] * 11)
 
 
-def test_exactly_the_photo_maximum_is_accepted(ctx):
-    build_service(ctx).validate_upload_counts([JPEG_HEADER] * MAX_PHOTOS)
+def test_just_under_the_photo_minimum_is_rejected(ctx, photo_limits):
+    photo_limits(min_photos=3, max_photos=10)
+    with pytest.raises(TooFewPhotosError):
+        build_service(ctx).validate_upload_counts([JPEG_HEADER] * 2)
+
+
+def test_exactly_the_photo_minimum_is_accepted(ctx, photo_limits):
+    photo_limits(min_photos=3, max_photos=10)
+    build_service(ctx).validate_upload_counts([JPEG_HEADER] * 3)
+
+
+def test_too_many_photos_is_rejected(ctx, photo_limits):
+    photo_limits(min_photos=1, max_photos=4)
+    with pytest.raises(TooManyPhotosError):
+        build_service(ctx).validate_upload_counts([JPEG_HEADER] * 5)
+
+
+def test_exactly_the_photo_maximum_is_accepted(ctx, photo_limits):
+    photo_limits(min_photos=1, max_photos=4)
+    build_service(ctx).validate_upload_counts([JPEG_HEADER] * 4)
 
 
 def test_too_many_videos_is_rejected(ctx):
+    service = build_service(ctx)
+    over = service.settings.MAX_UPLOAD_VIDEOS + 1
     with pytest.raises(TooManyVideosError):
-        build_service(ctx).validate_upload_counts([MP4_HEADER] * (MAX_VIDEOS + 1))
+        service.validate_upload_counts([MP4_HEADER] * over)
+
+
+def test_limit_messages_quote_the_configured_values(ctx, photo_limits):
+    """The caps are env-driven, so a client echoing the message stays truthful."""
+    photo_limits(min_photos=2, max_photos=2)
+    service = build_service(ctx)
+    with pytest.raises(TooManyPhotosError) as excinfo:
+        service.validate_upload_counts([JPEG_HEADER] * 3)
+    assert "maximum of 2" in excinfo.value.message
+    assert excinfo.value.details == {"max_photos": 2, "uploaded": 3}
 
 
 def test_a_single_video_needs_no_photo_minimum(ctx):
@@ -150,13 +191,23 @@ def test_a_single_video_needs_no_photo_minimum(ctx):
     build_service(ctx).validate_upload_counts([MP4_HEADER])
 
 
-def test_mixed_formats_all_count_as_photos(ctx):
-    build_service(ctx).validate_upload_counts([JPEG_HEADER, PNG_HEADER, JPEG_HEADER])
+def test_mixed_formats_all_count_as_photos(ctx, photo_limits):
+    """JPEG/PNG/WebP share one counter — three mixed parts trip a cap of two."""
+    photo_limits(min_photos=1, max_photos=2)
+    with pytest.raises(TooManyPhotosError):
+        build_service(ctx).validate_upload_counts([JPEG_HEADER, PNG_HEADER, JPEG_HEADER])
 
 
 def test_unrecognised_types_count_toward_neither_limit(ctx):
     """They are rejected later, per file — not by the photo/video counters."""
     build_service(ctx).validate_upload_counts([b"%PDF-1.4 not media at all"])
+
+
+def test_mixed_photo_and_video_is_rejected(ctx):
+    """One review is photos or videos, never both — not trusting the frontend's
+    client-side-only enforcement of the same rule."""
+    with pytest.raises(MixedMediaTypesError):
+        build_service(ctx).validate_upload_counts([JPEG_HEADER, MP4_HEADER])
 
 
 # ---------------------------------------------------------------------------

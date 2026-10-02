@@ -99,19 +99,25 @@ class VideoTooLongError(AppError):
 class TooFewPhotosError(AppError):
     code = "TOO_FEW_PHOTOS"
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
-    message = "At least 3 photos are required when uploading photos."
+    message = "Too few photos for this upload."
 
 
 class TooManyPhotosError(AppError):
     code = "TOO_MANY_PHOTOS"
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
-    message = "A maximum of 10 photos can be uploaded at once."
+    message = "Too many photos in a single upload."
 
 
 class TooManyVideosError(AppError):
     code = "TOO_MANY_VIDEOS"
     status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
-    message = "A maximum of 3 videos can be uploaded at once."
+    message = "Too many videos in a single upload."
+
+
+class MixedMediaTypesError(AppError):
+    code = "MIXED_MEDIA_TYPES"
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT
+    message = "Upload photos or videos, not both, in the same request."
 
 
 class NoMediaForSessionError(AppError):

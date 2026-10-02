@@ -86,17 +86,13 @@ async def _create_session(c: AsyncClient, user_id: UUID) -> str:
 
 
 async def _upload_image(c: AsyncClient, user_id: UUID, session_id: str) -> dict:
-    """Upload the minimum photo batch (3) and return the first MediaOut."""
+    """Upload one photo (the per-review cap) and return its MediaOut."""
     headers = {"Authorization": f"Bearer {_token(user_id)}"}
     image_bytes = JPEG_PATH.read_bytes()
     r = await c.post(
         f"/api/v1/sessions/{session_id}/media/",
         headers=headers,
-        files=[
-            ("file", ("surf.jpg", image_bytes, "image/jpeg")),
-            ("file", ("surf2.jpg", image_bytes, "image/jpeg")),
-            ("file", ("surf3.jpg", image_bytes, "image/jpeg")),
-        ],
+        files=[("file", ("surf.jpg", image_bytes, "image/jpeg"))],
     )
     assert r.status_code == 201
     return r.json()[0]

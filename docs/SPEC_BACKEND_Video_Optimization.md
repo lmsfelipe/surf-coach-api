@@ -11,7 +11,7 @@
 
 Session videos are uploaded and stored **raw** in Supabase Storage
 (`MediaService._store_object`, `app/services/media.py`) — up to
-`MAX_UPLOAD_SIZE_MB = 100` per file, `MAX_VIDEOS = 3` per session. They are
+`MAX_UPLOAD_SIZE_MB = 100` per file, `MAX_UPLOAD_VIDEOS = 3` per session. They are
 never re-encoded, so a phone clip (often 60–120 MB, frequently HEVC/`.mov`)
 sits in storage at full size for its entire life.
 

@@ -91,14 +91,10 @@ async def test_upload_image_returns_201_and_storage_url(client):
         r = await c.post(
             f"/api/v1/sessions/{session_id}/media/",
             headers=headers,
-            files=[
-                ("file", ("surf.jpg", image_bytes, "image/jpeg")),
-                ("file", ("surf2.jpg", image_bytes, "image/jpeg")),
-                ("file", ("surf3.jpg", image_bytes, "image/jpeg")),
-            ],
+            files=[("file", ("surf.jpg", image_bytes, "image/jpeg"))],
         )
     assert r.status_code == 201
-    assert len(r.json()) == 3
+    assert len(r.json()) == 1
     body = r.json()[0]
     assert body["mediaType"] == "image"
     assert "contentUrl" in body
@@ -134,11 +130,7 @@ async def test_upload_forbidden_for_other_user(client):
         r = await c.post(
             f"/api/v1/sessions/{session_id}/media/",
             headers={"Authorization": f"Bearer {_token(user_b)}"},
-            files=[
-                ("file", ("surf.jpg", image_bytes, "image/jpeg")),
-                ("file", ("surf2.jpg", image_bytes, "image/jpeg")),
-                ("file", ("surf3.jpg", image_bytes, "image/jpeg")),
-            ],
+            files=[("file", ("surf.jpg", image_bytes, "image/jpeg"))],
         )
     assert r.status_code == 403
     assert r.json()["error"]["code"] == "FORBIDDEN"
@@ -193,11 +185,7 @@ async def test_upload_non_surf_content_returns_422(client, _moderation_media_ser
         r = await c.post(
             f"/api/v1/sessions/{session_id}/media/",
             headers={"Authorization": f"Bearer {_token(user_id)}"},
-            files=[
-                ("file", ("img1.jpg", image_bytes, "image/jpeg")),
-                ("file", ("img2.jpg", image_bytes, "image/jpeg")),
-                ("file", ("img3.jpg", image_bytes, "image/jpeg")),
-            ],
+            files=[("file", ("img1.jpg", image_bytes, "image/jpeg"))],
         )
     assert r.status_code == 422
     body = r.json()["error"]
@@ -218,11 +206,7 @@ async def test_upload_explicit_content_returns_422(client, _moderation_media_ser
         r = await c.post(
             f"/api/v1/sessions/{session_id}/media/",
             headers={"Authorization": f"Bearer {_token(user_id)}"},
-            files=[
-                ("file", ("img1.jpg", image_bytes, "image/jpeg")),
-                ("file", ("img2.jpg", image_bytes, "image/jpeg")),
-                ("file", ("img3.jpg", image_bytes, "image/jpeg")),
-            ],
+            files=[("file", ("img1.jpg", image_bytes, "image/jpeg"))],
         )
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "EXPLICIT_CONTENT"
@@ -239,11 +223,7 @@ async def test_upload_surf_content_passes_moderation(client, _moderation_media_s
         r = await c.post(
             f"/api/v1/sessions/{session_id}/media/",
             headers={"Authorization": f"Bearer {_token(user_id)}"},
-            files=[
-                ("file", ("img1.jpg", image_bytes, "image/jpeg")),
-                ("file", ("img2.jpg", image_bytes, "image/jpeg")),
-                ("file", ("img3.jpg", image_bytes, "image/jpeg")),
-            ],
+            files=[("file", ("img1.jpg", image_bytes, "image/jpeg"))],
         )
     assert r.status_code == 201
-    assert len(gemini.moderation_calls) == 3
+    assert len(gemini.moderation_calls) == 1

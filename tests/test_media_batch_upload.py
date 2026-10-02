@@ -141,8 +141,15 @@ def batch(monkeypatch):
         upload_concurrency: int = 4,
         storage: InstrumentedStorage | None = None,
         gemini=None,
+        max_photos: int = 10,
     ) -> dict[str, object]:
         monkeypatch.setenv("UPLOAD_CONCURRENCY", str(upload_concurrency))
+        # Batch mechanics (concurrency, ordering, partial failure) need several
+        # parts in one request, so the per-review photo cap is widened here. The
+        # cap itself is covered by test_too_many_photos_rejects_before_any_store
+        # and by tests/test_media_service.py.
+        monkeypatch.setenv("MIN_UPLOAD_PHOTOS", "1")
+        monkeypatch.setenv("MAX_UPLOAD_PHOTOS", str(max_photos))
         if gemini is not None:
             monkeypatch.setenv("CONTENT_MODERATION_ENABLED", "true")
         get_settings.cache_clear()
@@ -445,6 +452,31 @@ async def test_invalid_type_rejects_whole_request(client, batch):
 
     assert r.status_code == 422
     assert r.json()["error"]["code"] == "INVALID_MEDIA_TYPE"
+    # Fail-fast in Phase 0: no object stored, no row inserted.
+    assert storage.uploaded == {}
+    assert media_repo.create_many_calls == 0
+
+
+async def test_mixed_photos_and_video_rejects_whole_request(client, batch, fake_video_magic):
+    pytest.importorskip("magic")
+    storage = InstrumentedStorage()
+    env = batch(upload_concurrency=4, storage=storage)
+    media_repo: RecordingMediaRepo = env["media_repo"]  # type: ignore[assignment]
+    user_id = uuid4()
+
+    files = _files([("wave0.jpg", _photo())])
+    files.append(("file", ("clip.mp4", b"FAKEVIDEO" + b"\x00" * 128, "video/mp4")))
+
+    async with client as c:
+        session_id = await _create_session(c, user_id)
+        r = await c.post(
+            f"/api/v1/sessions/{session_id}/media/",
+            headers={"Authorization": f"Bearer {_token(user_id)}"},
+            files=files,
+        )
+
+    assert r.status_code == 422
+    assert r.json()["error"]["code"] == "MIXED_MEDIA_TYPES"
     # Fail-fast in Phase 0: no object stored, no row inserted.
     assert storage.uploaded == {}
     assert media_repo.create_many_calls == 0

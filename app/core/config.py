@@ -1,7 +1,7 @@
 from functools import lru_cache
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Multipart boundaries, part headers and filenames ride along with the payload;
@@ -64,11 +64,30 @@ class Settings(BaseSettings):
     FRAME_EXTRACT_COUNT: int = Field(default=6, description="Frames sampled per video")
     MAX_UPLOAD_SIZE_MB: int = Field(default=100, description="Per-file upload size cap (MB)")
     MAX_UPLOAD_FILES: int = Field(
-        default=13,
+        default=11,
         description=(
             "Max parts accepted in one multipart upload, counted regardless of type. "
-            "Defaults to MAX_PHOTOS + MAX_VIDEOS so existing valid batches are unaffected."
+            "Bounds parts of any type, including ones the photo/video counters below "
+            "do not recognise, so keep it at or above MAX_UPLOAD_PHOTOS + MAX_UPLOAD_VIDEOS."
         ),
+    )
+    MIN_UPLOAD_PHOTOS: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Photos required in an upload that contains any photo at all. Must not "
+            "exceed MAX_UPLOAD_PHOTOS; a video-only upload is unaffected."
+        ),
+    )
+    MAX_UPLOAD_PHOTOS: int = Field(
+        default=10,
+        ge=1,
+        description="Max photos accepted in one upload.",
+    )
+    MAX_UPLOAD_VIDEOS: int = Field(
+        default=1,
+        ge=1,
+        description="Max videos accepted in one upload.",
     )
     MAX_VIDEO_DURATION_SEC: int = Field(default=120, description="Video duration cap (s)")
     UPLOAD_CONCURRENCY: int = Field(
@@ -156,6 +175,20 @@ class Settings(BaseSettings):
             "permanently-failing (corrupt or too-large) video from being re-enqueued forever."
         ),
     )
+
+    @model_validator(mode="after")
+    def _photo_bounds_are_satisfiable(self) -> "Settings":
+        """Reject MIN_UPLOAD_PHOTOS > MAX_UPLOAD_PHOTOS at startup.
+
+        Left to runtime it would not error — it would silently reject every
+        photo upload, since no count can satisfy both bounds.
+        """
+        if self.MIN_UPLOAD_PHOTOS > self.MAX_UPLOAD_PHOTOS:
+            raise ValueError(
+                f"MIN_UPLOAD_PHOTOS ({self.MIN_UPLOAD_PHOTOS}) cannot exceed "
+                f"MAX_UPLOAD_PHOTOS ({self.MAX_UPLOAD_PHOTOS})"
+            )
+        return self
 
     @property
     def is_development(self) -> bool:

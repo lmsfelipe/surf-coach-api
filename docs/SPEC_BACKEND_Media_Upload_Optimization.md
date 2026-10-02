@@ -10,7 +10,7 @@
 ## 1. Problem
 
 `POST /api/v1/sessions/{id}/media/` accepts a batch of up to `MAX_UPLOAD_FILES`
-parts (default 13; the product shape today is **one video, or a sequence of up
+parts (default 11; the product shape today is **one video, or a sequence of one
 to 10 photos**). The route spools every part to disk, then processes them in a
 **sequential `for` loop** (`app/api/media.py:107-109`), calling
 `MediaService.upload` once per file.
@@ -306,9 +306,9 @@ straight off the domain `AppError`.
 
 #### The min-photos wrinkle (accepted)
 
-`validate_upload_counts` enforces `MIN_PHOTOS = 3` on the **submitted** set. If
-three photos pass Phase 0 but one then fails its PUT, the session ends up with two
-saved photos — below the floor. Storage-stage partial success **accepts** this:
+`validate_upload_counts` enforces `MIN_UPLOAD_PHOTOS` (default 1) on the **submitted**
+set. If a batch at the floor passes Phase 0 but one part then fails its PUT, the
+session ends up below the floor. Storage-stage partial success **accepts** this:
 the floor is a submission-time guard, not a post-store guarantee, and the client
 restores the set by retrying the one `failed` file (§11). Re-checking the floor
 against *succeeded* count would force all-or-nothing on a transient network blip.
@@ -401,7 +401,7 @@ storage-only scope). New tests cover only the added behavior:
   test shape); all fail to store → `502` error envelope (existing shape).
 - **Validation/moderation still whole-request:** a wrong-type part → `422`
   error envelope, **no** partial save (existing tests assert this and must keep
-  passing); exceeding `MAX_PHOTOS` → `422`, before any storage write.
+  passing); exceeding `MAX_UPLOAD_PHOTOS` → `422`, before any storage write.
 - **Unexpected error not swallowed:** a non-`StorageUploadFailedError` from a
   store propagates and fails the request (guards against masking bugs).
 - **Single video unchanged:** `N=1` success path returns the same `201` +

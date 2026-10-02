@@ -13,6 +13,7 @@ from app.core.errors import (
     ForbiddenError,
     InvalidMediaTypeError,
     MediaNotSurfRelatedError,
+    MixedMediaTypesError,
     NotFoundError,
     StorageUploadFailedError,
     TooFewPhotosError,
@@ -36,10 +37,6 @@ logger = structlog.get_logger(__name__)
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 VIDEO_MIME_TYPES = {"video/mp4", "video/quicktime", "video/x-m4v"}
 ACCEPTED_MIME_TYPES = sorted(IMAGE_MIME_TYPES | VIDEO_MIME_TYPES)
-
-MIN_PHOTOS = 3
-MAX_PHOTOS = 10
-MAX_VIDEOS = 3
 
 MIME_EXT = {
     "image/jpeg": "jpg",
@@ -119,21 +116,39 @@ class MediaService:
         Takes the leading bytes of each part — libmagic only ever looks at the
         header, so there is no reason to hand it whole files.
         """
+        min_photos = self.settings.MIN_UPLOAD_PHOTOS
+        max_photos = self.settings.MAX_UPLOAD_PHOTOS
+        max_videos = self.settings.MAX_UPLOAD_VIDEOS
+
         detected = [magic.from_buffer(head, mime=True) for head in file_heads]
         photo_count = sum(1 for mime in detected if mime in IMAGE_MIME_TYPES)
         video_count = sum(1 for mime in detected if mime in VIDEO_MIME_TYPES)
 
-        if 0 < photo_count < MIN_PHOTOS:
+        # Photos and videos never mix in one review — the client enforces this
+        # in the upload UI, but the API rejects it too rather than trusting a
+        # client-side-only rule.
+        if photo_count > 0 and video_count > 0:
+            raise MixedMediaTypesError(
+                details={"photos": photo_count, "videos": video_count},
+            )
+
+        # The limits are configurable, so the counts go in the message as well as
+        # the details — a client showing the raw message stays accurate after a
+        # config change.
+        if 0 < photo_count < min_photos:
             raise TooFewPhotosError(
-                details={"min_photos": MIN_PHOTOS, "uploaded": photo_count},
+                f"At least {min_photos} photo(s) are required when uploading photos.",
+                details={"min_photos": min_photos, "uploaded": photo_count},
             )
-        if photo_count > MAX_PHOTOS:
+        if photo_count > max_photos:
             raise TooManyPhotosError(
-                details={"max_photos": MAX_PHOTOS, "uploaded": photo_count},
+                f"A maximum of {max_photos} photo(s) can be uploaded at once.",
+                details={"max_photos": max_photos, "uploaded": photo_count},
             )
-        if video_count > MAX_VIDEOS:
+        if video_count > max_videos:
             raise TooManyVideosError(
-                details={"max_videos": MAX_VIDEOS, "uploaded": video_count},
+                f"A maximum of {max_videos} video(s) can be uploaded at once.",
+                details={"max_videos": max_videos, "uploaded": video_count},
             )
 
     async def upload(

@@ -39,9 +39,19 @@ MB = 1024 * 1024
 def limits(monkeypatch):
     """Shrink the caps so the tests can cross them without moving real megabytes."""
 
-    def _apply(*, max_size_mb: int = 1, max_files: int = 2, upload_delay_sec: float = 0.0):
+    def _apply(
+        *,
+        max_size_mb: int = 1,
+        max_files: int = 2,
+        upload_delay_sec: float = 0.0,
+        max_photos: int = 10,
+    ):
         monkeypatch.setenv("MAX_UPLOAD_SIZE_MB", str(max_size_mb))
         monkeypatch.setenv("MAX_UPLOAD_FILES", str(max_files))
+        # These tests are about body/part bounds, not the per-review photo cap,
+        # so the photo limits are widened out of the way.
+        monkeypatch.setenv("MIN_UPLOAD_PHOTOS", "1")
+        monkeypatch.setenv("MAX_UPLOAD_PHOTOS", str(max_photos))
         get_settings.cache_clear()
 
         storage = FakeStorageClient(upload_delay_sec=upload_delay_sec)
