@@ -4,11 +4,14 @@ version = "0.1.0"
 description = "Surf Coaching Platform — FastAPI backend (Phase 1: Auth & Profile)"
 requires-python = ">=3.12"
 dependencies = [
-    "fastapi>=0.115",
+    # <0.137: from 0.137 included routers stay nested in app.routes, so slowapi's
+    # middleware (<=0.1.10) can't resolve the endpoint and silently exempts every
+    # route from RATE_LIMIT_DEFAULT. tests/test_rate_limit.py catches this.
+    "fastapi>=0.115,<0.137",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
-    "sqlalchemy>=2.0",
+    "sqlalchemy[asyncio]>=2.0",
     "asyncpg>=0.29",
     "alembic>=1.13",
     "python-jose[cryptography]>=3.3",
@@ -45,6 +48,9 @@ include = ["app*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Recent ruff also formats Python code blocks inside Markdown. The ones in docs/ are
+# spec excerpts and fragments, not runnable code, so keep ruff to real Python files.
+extend-exclude = ["*.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP"]

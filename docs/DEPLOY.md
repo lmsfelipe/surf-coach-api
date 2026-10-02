@@ -27,8 +27,9 @@ needed for video storage.
 ## 2. Pre-flight — already verified in the repos
 
 - [x] `ffmpeg` installed in the Dockerfile `base` stage (inherited by `prod`).
-- [x] Dockerfile installs deps from `pyproject.toml` — no drift between the
-      declared set and the image.
+- [x] Dockerfile installs deps from `uv.lock` (`uv sync --locked`, hash-verified) —
+      every build ships the exact versions CI tested, and `prod` gets runtime deps
+      only, no test/lint tools. See §16.
 - [x] `railway.json` (API) and `railway.worker.json` (worker) committed.
 - [x] `ALLOWED_HOSTS` setting exists and is honored in `app/main.py`
       (**fail-open** when unset — an unset var cannot 400 the whole deploy).
@@ -264,6 +265,7 @@ Defaults that need no override unless tuning: `FRAME_EXTRACT_COUNT`,
 | Frontend | Cloudflare Pages → Deployments → rollback to prior deployment |
 | Video optimization | Set `VIDEO_OPTIMIZE_ENABLED=false` — the task and sweep both no-op immediately |
 | Database | Migration `0013` is **additive and nullable**, so rolling back application code needs **no** DB downgrade |
+| Dependency upgrade | Redeploy the previous build as above, then `git revert` the `uv.lock` change so the next deploy doesn't bring it back (§16) |
 
 Note that video optimization is **not** reversible per-file: once a raw video is
 replaced by its compressed version, the original bytes are gone. That's the
@@ -282,3 +284,48 @@ passing smoke test rather than enabled on first deploy.
   mode; a spike means the pool or replica count changed.
 - **Sentry error rate** after enabling optimization — ffmpeg failures are
   swallowed by design, so they show as logs, not user-facing errors.
+
+## 16. Dependencies — the lock file
+
+`pyproject.toml` declares the *allowed* version ranges; `uv.lock` pins the exact
+version and sha256 hashes of every package, for Linux and macOS alike. The
+Dockerfile installs from the lock: the `deps` stage runs
+`uv sync --locked --no-install-project` (runtime dependencies only — this is what
+`prod` ships), and the `dev` stage adds the `dev` extra (pytest, ruff, …) on top.
+CI installs the same lock, so the versions CI tested are the versions Railway runs.
+
+Before the lock, every Railway build resolved to whatever was newest on PyPI. That
+broke production twice with no code change: SQLAlchemy 2.1 stopped installing
+`greenlet` unless the `asyncio` extra was requested, crashing the
+`alembic upgrade head` pre-deploy step; and FastAPI 0.137 began nesting included
+routers, which slowapi 0.1.10's middleware can't see, so every route silently
+dropped out of `RATE_LIMIT_DEFAULT`. Now versions change only when a PR changes
+`uv.lock`.
+
+Install uv locally with `brew install uv` (or see https://docs.astral.sh/uv/).
+
+| Task | Command |
+|---|---|
+| Add or change a dependency | edit `pyproject.toml`, then `uv lock` |
+| Upgrade one package | `uv lock --upgrade-package <name>` |
+| Upgrade everything | `uv lock --upgrade` |
+| Check the lock matches `pyproject.toml` | `uv lock --check` |
+| Apply the lock to your local `.venv` | `uv sync --extra dev` |
+
+`uv lock` re-resolves only what it must and prints one line per change
+(`Updated fastapi v0.136.3 -> v0.137.0`) — paste that into the PR description.
+
+- **Commit `uv.lock` with `pyproject.toml`.** If they disagree, `uv lock --check`
+  fails CI and `uv sync --locked` fails the Railway build, so a mismatch stops the
+  deploy rather than resolving something new.
+- **Treat a lock change as a code change.** Upgrade in a PR and let CI run the full
+  suite — it runs the repository integration tests against Postgres, and
+  `tests/test_rate_limit.py` catches the slowapi/FastAPI regression. For a broad
+  `uv lock --upgrade`, also build the image locally first:
+  `docker build --target prod .`
+- **Upper bounds need a reason.** When an upgrade breaks something, cap it in
+  `pyproject.toml` with a comment naming the breakage and the test that catches it
+  (see `fastapi>=0.115,<0.137`), re-lock, and lift the cap once the cause is fixed.
+- **uv itself is pinned** in two places: the Dockerfile
+  (`COPY --from=ghcr.io/astral-sh/uv:<version>`) and `.github/workflows/ci.yml`
+  (`setup-uv` → `version:`). Bump them together.

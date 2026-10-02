@@ -15,10 +15,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v7
         with:
+          # Keep in step with the uv image pinned in the Dockerfile.
+          version: "0.12.22"
           python-version: "3.12"
-      - run: pip install ruff
+          activate-environment: true
+      # Fails when pyproject.toml was edited without re-running `uv lock`. The Docker
+      # build fails the same way (`uv sync --locked`), but only once Railway builds it.
+      - run: uv lock --check
+      # The ruff pinned in uv.lock, so a new ruff release can't change the verdict.
+      - run: uv sync --locked --extra dev --no-install-project
       - run: ruff check .
       - run: ruff format --check .
 
@@ -48,14 +55,16 @@ jobs:
       GEMINI_API_KEY: fake-gemini-key
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: astral-sh/setup-uv@v7
         with:
+          version: "0.12.22"
           python-version: "3.12"
-          cache: pip
+          activate-environment: true
       # python-magic needs the native libmagic. Without it the media upload and
       # stream tests silently `importorskip` instead of running.
       - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libmagic1
-      - run: pip install -e ".[dev]"
+      # Test against the versions in uv.lock — the set the Docker image ships.
+      - run: uv sync --locked --extra dev
       - name: Verify libmagic is importable
         run: python -c "import magic; print('libmagic ok')"
       - run: alembic upgrade head

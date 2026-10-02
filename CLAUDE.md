@@ -12,10 +12,20 @@ FastAPI backend for a Surf Coaching Platform. Surfers upload session videos, rec
 # Run with Docker (starts Postgres + API with live reload, runs migrations automatically)
 docker compose up --build
 
-# Run locally
-pip install -e ".[dev]"
+# Run locally (needs uv: `brew install uv`)
+uv sync --extra dev            # .venv with the exact versions in uv.lock, plus dev tools
+source .venv/bin/activate
 alembic upgrade head
 uvicorn app.main:app --reload
+
+# Dependencies: pyproject.toml declares ranges, uv.lock pins exact versions + hashes.
+# Docker and CI install with `uv sync --locked`, which fails if the two disagree, so
+# commit uv.lock together with every pyproject.toml dependency change.
+uv lock                                # after editing pyproject.toml (other pins stay put)
+uv lock --upgrade-package fastapi      # bump one package within its pyproject bounds
+uv lock --upgrade                      # bump everything, then run the full test suite
+uv lock --check                        # lock in sync with pyproject.toml? (CI runs this)
+uv sync --extra dev                    # apply the updated lock to your .venv
 
 # Lint & format
 ruff check .
@@ -77,4 +87,5 @@ Because the fakes stand in for the real classes everywhere, two suites keep them
 - All database operations are async (asyncpg + SQLAlchemy async sessions).
 - Auth uses Supabase-issued JWTs verified server-side with `python-jose`. The `AuthUser` object (from JWT) carries `user_id` and `email`.
 - App is created via factory function `create_app()` in `app/main.py`.
-- Ruff config: line-length 100, target Python 3.12, lint rules: E, F, I, B, UP.
+- Ruff config: line-length 100, target Python 3.12, lint rules: E, F, I, B, UP. Markdown is excluded.
+- Dependency upgrades happen only through a `uv.lock` change, never implicitly at build time — see `docs/DEPLOY.md` §16. An upper bound in `pyproject.toml` (e.g. `fastapi<0.137`) carries a comment naming the breakage and the test that catches it. The uv version is pinned in both the Dockerfile and `.github/workflows/ci.yml`; bump them together.

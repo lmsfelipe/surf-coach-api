@@ -43,11 +43,16 @@ The API will be available at `http://localhost:8000`.
 
 ### 3. Run locally (without Docker)
 
+Dependencies are pinned in `uv.lock`; install [uv](https://docs.astral.sh/uv/) (`brew install uv`) first.
+
 ```bash
-pip install -e ".[dev]"
+uv sync --extra dev
+source .venv/bin/activate
 alembic upgrade head
 uvicorn app.main:app --reload
 ```
+
+To add or upgrade a dependency, see [docs/DEPLOY.md §16](docs/DEPLOY.md#16-dependencies--the-lock-file).
 
 ## Environment Variables
 
