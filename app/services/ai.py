@@ -664,6 +664,17 @@ class ReviewService:
         profile = await self.auth_repo.get_profile(review.profile_id)
         skill_level = profile.surf_level if profile else "beginner"
 
+        board_type: str | None = None
+        if session.surfboard_id is not None:
+            surfboard = await self.surfboard_repo.get_by_id(session.surfboard_id)
+            if surfboard is not None:
+                board_type = surfboard.board_type
+
+        # Everything below until mark_completed is downloads, frame extraction and
+        # Gemini — minutes of work that needs no database. Hand the connection back
+        # rather than holding a session-mode pooler slot idle the whole time.
+        await self.review_repo.release_connection()
+
         all_frames: list[bytes] = []
         for item in media_items:
             key = self._extract_key(item.storage_url, review.profile_id, review.session_id, item.id)
@@ -683,12 +694,6 @@ class ReviewService:
 
         if not all_frames:
             raise NoMediaForSessionError("No decodable media found for this session.")
-
-        board_type: str | None = None
-        if session.surfboard_id is not None:
-            surfboard = await self.surfboard_repo.get_by_id(session.surfboard_id)
-            if surfboard is not None:
-                board_type = surfboard.board_type
 
         context = SurferContext(
             skill_level=skill_level,
@@ -941,6 +946,9 @@ class TrainingService:
             height_cm=profile.height_cm if profile else None,
             weight_kg=profile.weight_kg if profile else None,
         )
+
+        # Don't hold a pooled connection idle through the Gemini call.
+        await self.review_repo.release_connection()
 
         plan_output = await asyncio.to_thread(self.gemini.generate_training_plan, context)
 

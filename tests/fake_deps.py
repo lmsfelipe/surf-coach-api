@@ -172,6 +172,7 @@ class FakeVideoTranscoder:
 class FakeReviewRepo:
     def __init__(self) -> None:
         self._store: dict[UUID, Review] = {}
+        self.releases = 0
 
     async def create(self, **kwargs) -> Review:
         now = datetime.now(tz=UTC)
@@ -251,6 +252,9 @@ class FakeReviewRepo:
             if r.session_id == session_id:
                 return r
         return None
+
+    async def release_connection(self) -> None:
+        self.releases += 1
 
 
 class FakeSurfboardRepo:

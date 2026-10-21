@@ -327,6 +327,28 @@ async def test_process_training_plan_fills_in_workouts(client, training_ctx):
 
 
 @pytest.mark.anyio
+async def test_process_training_plan_releases_the_db_connection_before_gemini(training_ctx):
+    """The Gemini call must not hold a session-mode pooler slot idle."""
+    reviews = training_ctx["reviews"]
+    releases_seen: list[int] = []
+    real_generate = training_ctx["gemini"].generate_training_plan
+
+    def _generate(context):
+        releases_seen.append(reviews.releases)
+        return real_generate(context)
+
+    training_ctx["gemini"].generate_training_plan = _generate
+    review = training_ctx["review"]
+    plan = await training_ctx["plans"].create_pending(
+        review_id=review.id, profile_id=training_ctx["user_id"]
+    )
+
+    await _build_training_service(training_ctx).process_training_plan(plan.id)
+
+    assert releases_seen == [1]
+
+
+@pytest.mark.anyio
 async def test_generate_plan_marks_failed_when_enqueue_fails(client, training_ctx):
     training_ctx["arq"] = FakeArqPool(raise_exc=RuntimeError("redis down"))
     user_id = training_ctx["user_id"]

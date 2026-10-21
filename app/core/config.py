@@ -22,6 +22,20 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     DATABASE_URL: str = Field(..., description="Async SQLAlchemy DSN (asyncpg driver)")
+    # Supabase's session-mode pooler (Supavisor, :5432) caps *all* clients of the
+    # project at its pool size — 15 by default — and every pooled connection held
+    # here, idle or not, counts against it. The API and the worker each get their
+    # own pool, so pool size + overflow, times processes, must stay under that cap
+    # with room left for the pre-deploy migration and a redeploy's overlap.
+    DB_POOL_SIZE: int = Field(default=5, ge=1, description="Pooled DB connections per process")
+    DB_MAX_OVERFLOW: int = Field(
+        default=0, ge=0, description="Extra DB connections opened past DB_POOL_SIZE under load"
+    )
+    DB_POOL_TIMEOUT_SEC: float = Field(
+        default=10.0,
+        gt=0,
+        description="Wait for a free pooled connection before failing the request (s)",
+    )
 
     SUPABASE_URL: str = Field(..., description="Supabase project URL")
     SUPABASE_ANON_KEY: str = Field(..., description="Supabase anon key (public)")

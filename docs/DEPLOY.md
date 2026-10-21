@@ -98,6 +98,14 @@ redeploy the API (§9). Leave `ALLOWED_HOSTS` **unset** for the initial bring-up
      change. (If you *must* use transaction mode/6543, `app/core/db.py` needs
      `connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0}`
      on `create_async_engine` — session mode avoids the change.)
+   - **Connection budget.** Session mode caps *every* client of the project at
+     the pooler's pool size — **15** by default (Database → Settings →
+     Connection pooling). Each pooled connection the app holds counts, idle or
+     not, and an over-cap connect fails with `EMAXCONNSESSION … max clients
+     reached in session mode`. The API and the worker each get their own pool of
+     `DB_POOL_SIZE + DB_MAX_OVERFLOW` (5 + 0 by default), so the two together
+     use at most 10, leaving room for the pre-deploy migration and a redeploy's
+     overlap. Raise the pooler's pool size before raising either of those.
 3. **Keys.** Grab `SUPABASE_URL`, anon key, service-role key, and the JWT secret
    (Settings → API).
 4. Leave auth redirect URLs for §9 (needs the Pages domain).
@@ -233,6 +241,7 @@ Only after §11 passes:
 | `SENTRY_DSN` | optional; empty disables |
 | `LOG_LEVEL` | `INFO` |
 | `VIDEO_OPTIMIZE_ENABLED` | `false` at first deploy → `true` in §12 |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | leave at `5` / `0` — sized for Supabase's session-mode cap (§5) |
 | `PORT` | injected by Railway — do not set |
 
 Defaults that need no override unless tuning: `FRAME_EXTRACT_COUNT`,
@@ -280,8 +289,9 @@ passing smoke test rather than enabled on first deploy.
   reduction is actually landing.
 - **Worker job durations** — transcode + Gemini stacking toward
   `WORKER_JOB_TIMEOUT_SEC` (240s) is the early warning to split or raise it.
-- **Supabase connection count** — should stay small with one replica in session
-  mode; a spike means the pool or replica count changed.
+- **Supabase connection count** — should stay at or under 10 (API + worker
+  pools) with one replica in session mode; a spike means the pool or replica
+  count changed. `EMAXCONNSESSION` in Sentry means the cap of 15 was hit (§5).
 - **Sentry error rate** after enabling optimization — ffmpeg failures are
   swallowed by design, so they show as logs, not user-facing errors.
 

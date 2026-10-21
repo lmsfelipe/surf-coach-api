@@ -128,6 +128,15 @@ class ReviewRepository:
         result = await self.db.execute(select(Review).where(Review.session_id == session_id))
         return result.scalar_one_or_none()
 
+    async def release_connection(self) -> None:
+        """End the session's read transaction so its pooled connection goes back.
+
+        The session is shared by every repository a worker job builds, so this
+        frees the connection for all of them. Objects already loaded stay usable
+        (``expire_on_commit=False``); the next query checks a connection out again.
+        """
+        await self.db.commit()
+
 
 class TrainingPlanRepository:
     def __init__(self, db: AsyncSession) -> None:
