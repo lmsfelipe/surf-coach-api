@@ -3,6 +3,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import joinedload
 
 from app.models.session import Session
 
@@ -39,8 +40,10 @@ class SessionsRepository:
         return result.scalar_one_or_none()
 
     async def list_for_profile(self, profile_id: UUID) -> list[Session]:
+        """Newest first, each with its review (or None) joined in the same query."""
         result = await self.db.execute(
             select(Session)
+            .options(joinedload(Session.review))
             .where(Session.profile_id == profile_id)
             .order_by(Session.session_date.desc())
         )

@@ -7,7 +7,7 @@ from app.core.deps import db_session, get_current_user
 from app.core.security.jwt import AuthUser
 from app.repositories.sessions import SessionsRepository
 from app.repositories.surfboards import SurfboardRepository
-from app.schemas.sessions import SessionCreate, SessionOut
+from app.schemas.sessions import SessionCreate, SessionListItemOut, SessionOut
 from app.services.sessions import SessionsService
 
 router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
@@ -32,13 +32,13 @@ async def create_session(
     return SessionOut.model_validate(session)
 
 
-@router.get("/", response_model=list[SessionOut], response_model_by_alias=True)
+@router.get("/", response_model=list[SessionListItemOut], response_model_by_alias=True)
 async def list_sessions(
     user: AuthUser = Depends(get_current_user),
     service: SessionsService = Depends(get_sessions_service),
-) -> list[SessionOut]:
+) -> list[SessionListItemOut]:
     sessions = await service.list_sessions(user)
-    return [SessionOut.model_validate(s) for s in sessions]
+    return [SessionListItemOut.model_validate(s) for s in sessions]
 
 
 @router.get(

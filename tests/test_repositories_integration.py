@@ -23,8 +23,8 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import event, text
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -216,6 +216,57 @@ async def test_deleting_a_session_removes_it(db, profile_id):
     await repo.delete(session)
 
     assert await repo.get(session.id) is None
+
+
+async def test_sessions_list_joins_each_review_in_one_query(db, profile_id):
+    repo = SessionsRepository(db)
+    reviewed = await _make_session(db, profile_id, session_date=date(2026, 4, 20))
+    await _make_session(db, profile_id, session_date=date(2026, 4, 10))
+    review = await ReviewRepository(db).create_pending(
+        session_id=reviewed.id, profile_id=profile_id
+    )
+    db.expunge_all()  # load from SQL, not from the identity map
+
+    statements: list[str] = []
+
+    def _count(conn, cursor, statement, *args):
+        statements.append(statement)
+
+    sync_engine = db.bind.sync_engine if hasattr(db.bind, "sync_engine") else db.bind
+    event.listen(sync_engine, "before_cursor_execute", _count)
+    try:
+        sessions = await repo.list_for_profile(profile_id)
+        reviews = [s.review for s in sessions]
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _count)
+
+    assert [r.id if r else None for r in reviews] == [review.id, None]
+    assert reviews[0].status == "processing"
+    assert len(statements) == 1
+
+
+async def test_a_single_session_never_lazy_loads_its_review(db, profile_id):
+    """lazy="raise": an un-joined review access fails loudly instead of an N+1."""
+    session = await _make_session(db, profile_id)
+    db.expunge_all()
+
+    loaded = await SessionsRepository(db).get(session.id)
+
+    with pytest.raises(InvalidRequestError):
+        _ = loaded.review
+
+
+async def test_deleting_a_reviewed_session_cascades_to_its_review(db, profile_id):
+    """The relationship is viewonly, so the delete must not need the review loaded."""
+    session = await _make_session(db, profile_id)
+    review = await ReviewRepository(db).create_pending(session_id=session.id, profile_id=profile_id)
+    db.expunge_all()
+    repo = SessionsRepository(db)
+
+    await repo.delete(await repo.get(session.id))
+    db.expunge_all()
+
+    assert await ReviewRepository(db).get(review.id) is None
 
 
 async def test_a_session_cannot_reference_a_missing_profile(db):

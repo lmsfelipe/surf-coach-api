@@ -48,8 +48,10 @@ class FakeAuthRepo:
 
 
 class FakeSessionsRepo:
-    def __init__(self) -> None:
+    def __init__(self, reviews: FakeReviewRepo | None = None) -> None:
         self._store: dict[UUID, Session] = {}
+        # The real list joins each session's review; pass the review fake to mirror it.
+        self._reviews = reviews
 
     async def create(self, **kwargs) -> Session:
         now = datetime.now(tz=UTC)
@@ -73,6 +75,9 @@ class FakeSessionsRepo:
     async def list_for_profile(self, profile_id: UUID) -> list[Session]:
         items = [s for s in self._store.values() if s.profile_id == profile_id]
         items.sort(key=lambda s: s.session_date, reverse=True)
+        if self._reviews is not None:
+            for item in items:
+                item.review = await self._reviews.get_for_session(item.id)
         return items
 
     async def delete(self, session: Session) -> None:
