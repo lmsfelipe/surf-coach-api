@@ -3,7 +3,7 @@ from uuid import UUID
 
 from sqlalchemy import Date, DateTime, ForeignKey, Numeric, Text, func, text
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.db import Base
 
@@ -39,4 +39,12 @@ class Session(Base):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+
+    # Loaded only where asked for (the sessions list joins it in one query);
+    # lazy="raise" turns an accidental per-row load into an error rather than an
+    # N+1. viewonly: the DB's ON DELETE CASCADE owns the lifecycle, so deleting a
+    # session never has to load its review first.
+    review: Mapped["Review | None"] = relationship(  # noqa: F821
+        "Review", uselist=False, lazy="raise", viewonly=True
     )

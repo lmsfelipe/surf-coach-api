@@ -1,12 +1,18 @@
 # SPEC — Merge the arq Worker into the API (Single Sleepable Service)
 
-**Status:** Proposed
+**Status:** Implemented (2026-10-29)
 **Owner:** Backend
 **Date:** 2026-10-21
 **Supersedes (in part):** `SPEC_BACKEND_Async_Review_Processing.md` §4.1–4.2, §4.5 (arq + Redis + worker process),
 `SPEC_BACKEND_Stuck_Job_Recovery.md` §4.4 (per-minute sweeper cron),
 `SPEC_BACKEND_Video_Optimization.md` (server-side transcode)
 **Unchanged:** the HTTP contract (202 + poll), the `status` lifecycle, the frontend.
+**Companion spec:** `SPEC_BACKEND_Job_Queue_Hardening.md` adds the queue limit, separate
+wait and run timeouts, Gemini deadlines and job metrics on top of the `JobRunner`
+defined here. **Implement the two together.** This spec alone lets bursts fail late
+with a misleading message and leaves hung Gemini threads inside the API process.
+Where this spec and the companion disagree (the `JobRunner` signature, the
+config table, the route snippet), the companion wins.
 
 ---
 
@@ -79,8 +85,15 @@ can limit concurrency, apply timeouts, and drain them on shutdown.
 class JobRunner:
     def __init__(self, max_concurrent: int, timeout_sec: int, shutdown_grace_sec: int): ...
 
-    def submit(self, fn: Callable[..., Awaitable[None]], *args: str) -> None:
-        """Schedule fn(*args) and return immediately. Raises JobRunnerClosedError after close()."""
+    def submit(
+        self,
+        fn: Callable[[str], Awaitable[None]],
+        job_id: str,
+        *,
+        on_failure: Callable[[str, str], Awaitable[None]],
+    ) -> None:
+        """Schedule fn(job_id) and return immediately. Raises JobRunnerClosedError after close()
+        (and JobRunnerBusyError when the queue is full; see the companion spec §4.2)."""
 
     @property
     def shutting_down(self) -> bool: ...
@@ -91,13 +104,14 @@ class JobRunner:
 
 Behaviour:
 
-| Concern           | Rule                                                                                                                                                                                                                                             |
-| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Strong references | Each task goes in `self._tasks: set[asyncio.Task]` and is removed by `add_done_callback`. A bare `create_task` can be garbage-collected mid-run.                                                                                                 |
-| Concurrency       | `asyncio.Semaphore(max_concurrent)`. Jobs beyond the cap wait in the runner, not in Redis.                                                                                                                                                       |
-| Timeout           | `async with asyncio.timeout(timeout_sec)` wraps **semaphore wait + run**. Total wall time from submit is ≤ `JOB_TIMEOUT_SEC`, so the invariant `STUCK_JOB_THRESHOLD_SEC > JOB_TIMEOUT_SEC` (§4.5) holds without a separate queue-wait allowance. |
-| Errors            | The wrapper catches and logs any exception or `TimeoutError` that escapes the job, so one job can never crash the runner or produce "Task exception was never retrieved" warnings.                                                               |
-| Signature         | `submit(fn, *args)`, where `fn` is the task function itself. The test fake records `(fn.__name__, args)`, so existing assertions like `("process_review_task", (id,))` keep their shape.                                                         |
+| Concern               | Rule                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Strong references     | Each task goes in `self._tasks: set[asyncio.Task]` and is removed by `add_done_callback`. A bare `create_task` can be garbage-collected mid-run.                                                                                                                                                                                                                                                                                                                                      |
+| Concurrency           | `asyncio.Semaphore(max_concurrent)`. Jobs beyond the cap wait in the runner, not in Redis.                                                                                                                                                                                                                                                                                                                                                                                            |
+| Timeout               | `async with asyncio.timeout(timeout_sec)` wraps **semaphore wait + run**. Total wall time from submit is ≤ `JOB_TIMEOUT_SEC`, so the invariant `STUCK_JOB_THRESHOLD_SEC > JOB_TIMEOUT_SEC` (§4.5) holds without a separate queue-wait allowance.                                                                                                                                                                                                                                      |
+| Errors                | The wrapper catches and logs any exception or `TimeoutError` that escapes the job, so one job can never crash the runner or produce "Task exception was never retrieved" warnings.                                                                                                                                                                                                                                                                                                    |
+| Jobs that never start | A job cancelled while it's still waiting for a slot (timeout or shutdown) never enters `fn`, so `fn`'s own `except CancelledError` can't mark the row. The runner calls `on_failure(job_id, message)` for that case instead (`mark_review_failed` / `mark_plan_failed`). Once `fn` is running, `fn` handles its own failures and `on_failure` is not called. Without this, those rows stay `processing` until the startup sweep or read-path check. Full design: companion spec §4.2. |
+| Signature             | `submit(fn, job_id, *, on_failure)`, where `fn` is the task function itself. The test fake records `(fn.__name__, (job_id,))`, so existing assertions like `("process_review_task", (id,))` keep their shape.                                                                                                                                                                                                                                                                         |
 
 Why not FastAPI `BackgroundTasks`: it has no concurrency cap, no timeout and no
 handle for draining on shutdown, and it runs inside the request's middleware
@@ -150,7 +164,9 @@ injected pool with the runner, and keep the existing guard:
 ```python
 review = await service.enqueue_review(payload.session_id, user)
 try:
-    runner.submit(process_review_task, str(review.id))
+    runner.submit(process_review_task, str(review.id), on_failure=mark_review_failed)
+except JobRunnerBusyError:  # companion spec §4.4
+    review = await service.review_repo.mark_failed(review.id, BUSY_MESSAGE)
 except Exception:  # JobRunnerClosedError during shutdown
     logger.exception("Failed to enqueue review %s", review.id)
     review = await service.review_repo.mark_failed(review.id, ENQUEUE_FAILED_MESSAGE)
@@ -192,7 +208,10 @@ its handlers. In a single process, every failure falls into one of these cases:
 | ------------------------------- | ---------------------------------------------------------------------------------- |
 | Exception in the job            | The task's `except Exception` (unchanged)                                          |
 | `JOB_TIMEOUT_SEC` exceeded      | The task's `except CancelledError` → `TIMEOUT_MESSAGE`                             |
-| Redeploy / SIGTERM              | `JobRunner.close()` waits `JOB_SHUTDOWN_GRACE_SEC`, then cancels → `SWEEP_MESSAGE` |
+| Queue full at submit            | The route → `BUSY_MESSAGE` (companion spec)                                        |
+| Waited too long for a slot      | The runner's `on_failure` → `BUSY_MESSAGE` (companion spec)                        |
+| Redeploy / SIGTERM, job queued  | `JobRunner.close()` cancels it at once → `on_failure` → `SWEEP_MESSAGE`            |
+| Redeploy / SIGTERM, job running | `JobRunner.close()` waits `JOB_SHUTDOWN_GRACE_SEC`, then cancels → `SWEEP_MESSAGE` |
 | OOM kill / SIGKILL / host crash | No handler runs. Covered by the two checks below                                   |
 
 For the last case:
@@ -256,6 +275,10 @@ Delete it in the same change (or merge a separate PR first):
 | `WORKER_JOB_TIMEOUT_SEC`  | `JOB_TIMEOUT_SEC`        | `240`   | Same value; now includes time spent waiting for a slot.                                                                                                             |
 | —                         | `JOB_SHUTDOWN_GRACE_SEC` | `25`    | How long a redeploy waits for running jobs before cancelling them.                                                                                                  |
 | `STUCK_JOB_THRESHOLD_SEC` | (kept)                   | `300`   | Description updated (§4.5).                                                                                                                                         |
+
+The companion spec adds `JOBS_MAX_QUEUED`, `JOB_MAX_WAIT_SEC`,
+`GEMINI_REQUEST_TIMEOUT_SEC`, `GEMINI_MIN_ATTEMPT_SEC` and `GEMINI_DEADLINE_MARGIN_SEC`
+(companion §4.6), with validators tying them to `JOB_TIMEOUT_SEC`.
 
 `Settings` uses `extra="ignore"`, so stale variables left in Railway won't break
 boot, but remove them anyway (§6).
@@ -325,6 +348,10 @@ still exists (step 6).
 - [ ] A job that exceeds `JOB_TIMEOUT_SEC` ends `failed` with `TIMEOUT_MESSAGE`.
 - [ ] A job still running when the app shuts down ends `failed` with
       "Processing was interrupted." within `JOB_SHUTDOWN_GRACE_SEC`.
+- [ ] A job still **waiting for a slot** when the app shuts down, or when its wait
+      times out, is marked `failed` by the runner without the sweep.
+- [ ] The companion spec's acceptance criteria (queue limit, wait vs run
+      timeouts, Gemini deadline, `job.finished` logs) pass too.
 - [ ] After a simulated hard kill (row left `processing`, older than the
       threshold), the next startup marks it `failed`.
 - [ ] Polling a stale `processing` **training plan** marks it `failed`
@@ -384,13 +411,15 @@ arq pool lifecycle tests in `test_auth_jwt_deps.py`,
 
 ## 9. Risks and trade-offs
 
-| Risk                                                                           | Mitigation                                                                                                                                                                 |
-| ------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| A review's memory spike now hits the API container; an OOM takes HTTP down too | `JOBS_MAX_CONCURRENT=2`; client-side compression keeps videos small; Railway restarts the container and the startup sweep fails the orphaned rows. Watch RAM after launch. |
-| Blocking code added to a job later stalls HTTP                                 | Rule in §4.3 plus the `/health/live` latency acceptance check.                                                                                                             |
-| Redeploy interrupts running jobs                                               | Rare at this traffic; ends `failed` with a retry, same as a worker restart today.                                                                                          |
-| Cold start after sleep slows the first request                                 | Acceptable trade for ≈ $0 idle; lazy heavy imports.                                                                                                                        |
-| Traffic grows past one process                                                 | Bring back a queue then. The task functions stay plain `async def fn(id: str)`, so re-wrapping them for arq (or similar) is mechanical.                                    |
+| Risk                                                                                         | Mitigation                                                                                                                                                                 |
+| -------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A review's memory spike now hits the API container; an OOM takes HTTP down too               | `JOBS_MAX_CONCURRENT=2`; client-side compression keeps videos small; Railway restarts the container and the startup sweep fails the orphaned rows. Watch RAM after launch. |
+| Blocking code added to a job later stalls HTTP                                               | Rule in §4.3 plus the `/health/live` latency acceptance check.                                                                                                             |
+| A burst of reviews: jobs at the back wait out their whole budget and fail as "took too long" | Companion spec: queue limit with an immediate "busy" response, and a separate wait cap.                                                                                    |
+| A hung Gemini call keeps its thread (and frames) alive in the API after the job times out    | Companion spec: per-attempt HTTP timeout plus a deadline-aware retry loop.                                                                                                 |
+| Redeploy interrupts running jobs                                                             | Rare at this traffic; ends `failed` with a retry, same as a worker restart today.                                                                                          |
+| Cold start after sleep slows the first request                                               | Acceptable trade for ≈ $0 idle; lazy heavy imports.                                                                                                                        |
+| Traffic grows past one process                                                               | Bring back a queue then. The task functions stay plain `async def fn(id: str)`, so re-wrapping them for arq (or similar) is mechanical.                                    |
 
 ## 10. Open questions
 
@@ -398,3 +427,4 @@ arq pool lifecycle tests in `test_auth_jwt_deps.py`,
    240 s? (Longer drains slow every deploy for a rare edge case.)
 2. Should `JOBS_MAX_CONCURRENT` scale with the container's RAM limit instead of
    being a fixed setting? A fixed setting is simpler; revisit if RAM is resized.
+   The companion spec's `job.finished` metrics are the input for that decision.

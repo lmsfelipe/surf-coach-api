@@ -23,6 +23,7 @@ from app.core.errors import (
     TrainingPlanNotRetryableError,
 )
 from app.core.frame_extractor import FrameExtractor
+from app.core.jobs import JOB_DEADLINE
 from app.core.security.jwt import AuthUser
 from app.core.storage import StorageClient
 from app.models.review import Review
@@ -272,6 +273,22 @@ def _is_retryable(exc: BaseException) -> bool:
     return False
 
 
+def _with_request_timeout(config, timeout_sec: float):
+    """Copy ``config`` with an explicit per-request HTTP timeout (milliseconds).
+
+    httpx applies it per phase (connect / read / write) rather than as a total.
+    For a non-streaming ``generate_content`` the server sends nothing until the
+    answer is ready, so the read timeout is effectively the wait for the
+    response — close enough to a wall clock for our purposes.
+    """
+    from google.genai import types
+
+    http_options = types.HttpOptions(timeout=int(timeout_sec * 1000))
+    if config is None:
+        return types.GenerateContentConfig(http_options=http_options)
+    return config.model_copy(update={"http_options": http_options})
+
+
 def _generate_content_with_retry(
     client,
     *,
@@ -280,22 +297,61 @@ def _generate_content_with_retry(
     config,
     max_attempts: int,
     base_delay: float,
+    request_timeout_sec: float,
+    min_attempt_sec: float,
+    deadline_margin_sec: float,
 ):
     """Call ``generate_content`` with exponential backoff on transient errors.
 
     This runs inside ``asyncio.to_thread`` (every caller is a sync method
     dispatched off the event loop), so the blocking ``time.sleep`` between
     attempts does not stall the loop. Non-retryable errors propagate immediately.
+
+    A thread cannot be cancelled, so without a timeout a hung call would outlive
+    the job that started it — holding the frames it was sent, inside the process
+    that also serves HTTP. ``asyncio.to_thread`` copies the context, so the job's
+    deadline (``JOB_DEADLINE``) is visible here: every attempt is capped by it,
+    and neither a new attempt nor a backoff sleep starts when there is no time
+    left to finish one. Outside a job the deadline is unset and only the fixed
+    ``request_timeout_sec`` applies.
     """
     attempts = max(1, max_attempts)
+    last_exc: BaseException | None = None
     for attempt in range(1, attempts + 1):
+        attempt_timeout = request_timeout_sec
+        deadline = JOB_DEADLINE.get()
+        if deadline is not None:
+            remaining = deadline - time.monotonic() - deadline_margin_sec
+            if remaining < min_attempt_sec:
+                logger.warning(
+                    "Gemini deadline reached; not starting another attempt",
+                    attempt=attempt,
+                    remaining_sec=round(remaining, 2),
+                )
+                if last_exc is not None:
+                    raise last_exc
+                raise AIGenerationFailedError()
+            attempt_timeout = min(request_timeout_sec, remaining)
         try:
-            return client.models.generate_content(model=model, contents=contents, config=config)
+            return client.models.generate_content(
+                model=model,
+                contents=contents,
+                config=_with_request_timeout(config, attempt_timeout),
+            )
         except Exception as exc:  # noqa: BLE001 — re-raised below when not retryable
             if attempt >= attempts or not _is_retryable(exc):
                 raise
+            last_exc = exc
             delay = base_delay * (2 ** (attempt - 1))
             delay += random.uniform(0, delay * 0.25)  # jitter to avoid synchronised retries
+            deadline = JOB_DEADLINE.get()
+            if deadline is not None and delay >= deadline - time.monotonic() - min_attempt_sec:
+                logger.warning(
+                    "Gemini retry would sleep past the job deadline; giving up",
+                    attempt=attempt,
+                    retry_in_sec=round(delay, 2),
+                )
+                raise
             logger.warning(
                 "Gemini call failed; retrying",
                 attempt=attempt,
@@ -332,6 +388,16 @@ class GeminiService:
         self.settings = get_settings()
         self.api_key = api_key or self.settings.GEMINI_API_KEY
         self.model_name = model_name or self.settings.GEMINI_MODEL
+
+    def _retry_kwargs(self) -> dict:
+        """Retry, backoff and timeout budget shared by every Gemini call."""
+        return {
+            "max_attempts": self.settings.GEMINI_MAX_ATTEMPTS,
+            "base_delay": self.settings.GEMINI_RETRY_BASE_DELAY_SEC,
+            "request_timeout_sec": self.settings.GEMINI_REQUEST_TIMEOUT_SEC,
+            "min_attempt_sec": self.settings.GEMINI_MIN_ATTEMPT_SEC,
+            "deadline_margin_sec": self.settings.GEMINI_DEADLINE_MARGIN_SEC,
+        }
 
     def analyze_surf_media(
         self,
@@ -370,8 +436,7 @@ class GeminiService:
                 model=self.model_name,
                 contents=parts,
                 config=types.GenerateContentConfig(**config_kwargs),
-                max_attempts=self.settings.GEMINI_MAX_ATTEMPTS,
-                base_delay=self.settings.GEMINI_RETRY_BASE_DELAY_SEC,
+                **self._retry_kwargs(),
             )
             text = getattr(response, "text", None) or ""
         except Exception as e:
@@ -420,8 +485,7 @@ class GeminiService:
                     response_schema=NarrativeRefinement,
                     thinking_config=_thinking_config(self.settings.GEMINI_THINKING_LEVEL),
                 ),
-                max_attempts=self.settings.GEMINI_MAX_ATTEMPTS,
-                base_delay=self.settings.GEMINI_RETRY_BASE_DELAY_SEC,
+                **self._retry_kwargs(),
             )
             text = getattr(response, "text", None) or ""
         except Exception as e:
@@ -470,8 +534,7 @@ class GeminiService:
                     response_schema=ModerationOutput,
                     thinking_config=_thinking_config(self.settings.GEMINI_THINKING_LEVEL),
                 ),
-                max_attempts=self.settings.GEMINI_MAX_ATTEMPTS,
-                base_delay=self.settings.GEMINI_RETRY_BASE_DELAY_SEC,
+                **self._retry_kwargs(),
             )
             raw_text = getattr(response, "text", None) or ""
         except Exception as e:
@@ -554,8 +617,7 @@ class GeminiService:
                     response_schema=TrainingPlanOutput,
                     thinking_config=_thinking_config(self.settings.GEMINI_THINKING_LEVEL),
                 ),
-                max_attempts=self.settings.GEMINI_MAX_ATTEMPTS,
-                base_delay=self.settings.GEMINI_RETRY_BASE_DELAY_SEC,
+                **self._retry_kwargs(),
             )
             raw_text = getattr(response, "text", None) or ""
         except Exception as e:
@@ -597,10 +659,32 @@ def normalise_scores(scores: ScoreRubric) -> dict[str, Decimal | None]:
     return values
 
 
-class ReviewService:
-    # Matches the worker sweeper's message (worker.SWEEP_MESSAGE).
-    STUCK_PROCESSING_MESSAGE = "Processing was interrupted."
+# Matches the startup sweep's message (app.core.jobs.SWEEP_MESSAGE), kept as a
+# literal so the service layer does not depend on the job runner.
+STUCK_PROCESSING_MESSAGE = "Processing was interrupted."
 
+
+def _stale_processing_age_sec(row, threshold_sec: float) -> float | None:
+    """Age in seconds of a 'processing' row that is past the stuck threshold.
+
+    None when the row is not processing, has no start time, or is still young
+    enough to be a live job. Shared by the review and training-plan read paths:
+    every normal failure marks its own row, so this only catches what a hard kill
+    (OOM, SIGKILL) left behind, between the kill and the next startup sweep.
+    Without it the client polls a row that no job will ever finish.
+    """
+    if row.status != "processing":
+        return None
+    started = row.processing_started_at or row.created_at
+    if started is None:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    age = (datetime.now(tz=UTC) - started).total_seconds()
+    return age if age > threshold_sec else None
+
+
+class ReviewService:
     def __init__(
         self,
         sessions_repo: SessionsRepository,
@@ -625,7 +709,7 @@ class ReviewService:
     async def enqueue_review(self, session_id: UUID, user: AuthUser) -> Review:
         """Validate inputs, create a pending review row, and return it.
 
-        The caller (API route) is responsible for enqueueing the worker job.
+        The caller (API route) is responsible for submitting the job.
         """
         session = await self.sessions_repo.get(session_id)
         if session is None:
@@ -648,7 +732,7 @@ class ReviewService:
         return await self.review_repo.create_pending(session_id=session_id, profile_id=user.id)
 
     async def process_review(self, review_id: UUID) -> Review:
-        """Heavy processing — called by the arq worker, not from an HTTP handler."""
+        """Heavy processing — called by the job runner, not from an HTTP handler."""
         import asyncio
 
         review = await self.review_repo.get(review_id)
@@ -663,6 +747,17 @@ class ReviewService:
 
         profile = await self.auth_repo.get_profile(review.profile_id)
         skill_level = profile.surf_level if profile else "beginner"
+
+        board_type: str | None = None
+        if session.surfboard_id is not None:
+            surfboard = await self.surfboard_repo.get_by_id(session.surfboard_id)
+            if surfboard is not None:
+                board_type = surfboard.board_type
+
+        # Everything below until mark_completed is downloads, frame extraction and
+        # Gemini — minutes of work that needs no database. Hand the connection back
+        # rather than holding a session-mode pooler slot idle the whole time.
+        await self.review_repo.release_connection()
 
         all_frames: list[bytes] = []
         for item in media_items:
@@ -683,12 +778,6 @@ class ReviewService:
 
         if not all_frames:
             raise NoMediaForSessionError("No decodable media found for this session.")
-
-        board_type: str | None = None
-        if session.surfboard_id is not None:
-            surfboard = await self.surfboard_repo.get_by_id(session.surfboard_id)
-            if surfboard is not None:
-                board_type = surfboard.board_type
 
         context = SurferContext(
             skill_level=skill_level,
@@ -770,7 +859,7 @@ class ReviewService:
         )
 
     async def retry_review(self, review_id: UUID, user: AuthUser) -> Review:
-        """Reset a failed review to processing. Caller enqueues the worker job."""
+        """Reset a failed review to processing. Caller submits the job."""
         review = await self.review_repo.get(review_id)
         if review is None:
             raise NotFoundError("Review not found.")
@@ -781,30 +870,16 @@ class ReviewService:
         return await self.review_repo.reset_for_retry(review_id)
 
     async def _fail_if_stale(self, review: Review) -> Review:
-        """Fail a review left in 'processing' past the stuck threshold.
-
-        The worker's sweeper normally does this, but it only runs inside the
-        worker process. If the worker is offline (yet Redis accepted the enqueue),
-        the job never runs and the sweeper never fires, so the row would stay
-        'processing' forever and the client would poll in an endless loop. This
-        read-path check is the worker-independent safety net that breaks it.
-        """
-        if review.status != "processing":
-            return review
-        started = review.processing_started_at or review.created_at
-        if started is None:
-            return review
-        if started.tzinfo is None:
-            started = started.replace(tzinfo=UTC)
-        age = (datetime.now(tz=UTC) - started).total_seconds()
-        if age <= self.settings.STUCK_JOB_THRESHOLD_SEC:
+        """Fail a review a hard-killed process left in 'processing' (see the helper)."""
+        age = _stale_processing_age_sec(review, self.settings.STUCK_JOB_THRESHOLD_SEC)
+        if age is None:
             return review
         logger.warning(
             "Review stuck in processing; failing on read",
             review_id=str(review.id),
             age_sec=int(age),
         )
-        return await self.review_repo.mark_failed(review.id, self.STUCK_PROCESSING_MESSAGE)
+        return await self.review_repo.mark_failed(review.id, STUCK_PROCESSING_MESSAGE)
 
     async def get_review(self, review_id: UUID, user: AuthUser) -> Review:
         review = await self.review_repo.get(review_id)
@@ -909,7 +984,7 @@ class TrainingService:
         return await self.training_plan_repo.create_pending(review_id=review_id, profile_id=user.id)
 
     async def process_training_plan(self, plan_id: UUID) -> TrainingPlan:
-        """Heavy processing — called by the arq worker."""
+        """Heavy processing — called by the job runner."""
         import asyncio
 
         plan = await self.training_plan_repo.get_by_id(plan_id)
@@ -942,6 +1017,9 @@ class TrainingService:
             weight_kg=profile.weight_kg if profile else None,
         )
 
+        # Don't hold a pooled connection idle through the Gemini call.
+        await self.review_repo.release_connection()
+
         plan_output = await asyncio.to_thread(self.gemini.generate_training_plan, context)
 
         workouts_data = [
@@ -970,7 +1048,7 @@ class TrainingService:
         )
 
     async def retry_training_plan(self, plan_id: UUID, user: AuthUser) -> TrainingPlan:
-        """Reset a failed plan to processing. Caller enqueues the worker job."""
+        """Reset a failed plan to processing. Caller submits the job."""
         plan = await self.training_plan_repo.get_by_id(plan_id)
         if plan is None:
             raise NotFoundError("Training plan not found.")
@@ -983,13 +1061,25 @@ class TrainingService:
     async def list_plans(self, user: AuthUser) -> list[TrainingPlan]:
         return await self.training_plan_repo.list_for_profile(user.id)
 
+    async def _fail_if_stale(self, plan: TrainingPlan) -> TrainingPlan:
+        """Fail a plan a hard-killed process left in 'processing' (see the helper)."""
+        age = _stale_processing_age_sec(plan, self.settings.STUCK_JOB_THRESHOLD_SEC)
+        if age is None:
+            return plan
+        logger.warning(
+            "Training plan stuck in processing; failing on read",
+            plan_id=str(plan.id),
+            age_sec=int(age),
+        )
+        return await self.training_plan_repo.mark_failed(plan.id, STUCK_PROCESSING_MESSAGE)
+
     async def get_plan_by_id(self, plan_id: UUID, user: AuthUser) -> TrainingPlan:
         plan = await self.training_plan_repo.get_by_id(plan_id)
         if plan is None:
             raise NotFoundError("Training plan not found.")
         if plan.profile_id != user.id:
             raise ForbiddenError()
-        return plan
+        return await self._fail_if_stale(plan)
 
     async def get_plan_by_review_id(self, review_id: UUID, user: AuthUser) -> TrainingPlan:
         review = await self.review_repo.get(review_id)
@@ -1000,7 +1090,7 @@ class TrainingService:
         plan = await self.training_plan_repo.get_by_review_id(review_id)
         if plan is None:
             raise NotFoundError("No training plan exists for this review yet.")
-        return plan
+        return await self._fail_if_stale(plan)
 
     async def get_workout_by_id(self, workout_id: UUID, user: AuthUser):
         workout = await self.training_plan_repo.get_workout_by_id(workout_id)

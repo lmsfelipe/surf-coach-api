@@ -9,13 +9,13 @@ from httpx import ASGITransport, AsyncClient
 from jose import jwt
 
 from app.core.config import get_settings
-from app.core.deps import db_session, get_arq_pool
+from app.core.deps import db_session, get_job_runner
 from app.core.rate_limit import limiter
 from app.main import app
 
 
-class _FakeArqPool:
-    async def enqueue_job(self, *args, **kwargs):
+class _FakeJobRunner:
+    def submit(self, fn, job_id, *, on_failure):
         pass
 
 
@@ -37,11 +37,11 @@ def _token(user_id=None, email="surfer@example.com"):
 
 @pytest.fixture(autouse=True)
 def _override_infra():
-    """Override infra deps to avoid Redis/Postgres connections."""
-    app.dependency_overrides[get_arq_pool] = _FakeArqPool
+    """Override infra deps so no job runs and no Postgres connection is needed."""
+    app.dependency_overrides[get_job_runner] = _FakeJobRunner
     app.dependency_overrides[db_session] = _fake_db_session
     yield
-    app.dependency_overrides.pop(get_arq_pool, None)
+    app.dependency_overrides.pop(get_job_runner, None)
     app.dependency_overrides.pop(db_session, None)
 
 

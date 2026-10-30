@@ -1,16 +1,18 @@
 from uuid import UUID
 
 import structlog
-from arq import ArqRedis
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.deps import db_session, get_arq_pool, get_current_user
+from app.core.deps import db_session, get_current_user, get_job_runner
 from app.core.frame_extractor import FrameExtractor
+from app.core.jobs import JobRunner, JobRunnerBusyError
 from app.core.rate_limit import limiter
 from app.core.security.jwt import AuthUser
 from app.core.storage import StorageClient, get_storage_client
+from app.jobs import BUSY_MESSAGE, mark_review_failed, process_review_task
+from app.models.review import Review
 from app.repositories.ai import ReviewRepository
 from app.repositories.auth import AuthRepository
 from app.repositories.media import MediaRepository
@@ -52,6 +54,24 @@ def get_review_service(
     )
 
 
+async def _submit_review_job(runner: JobRunner, service: ReviewService, review: Review) -> Review:
+    """Hand the review to the runner, or fail the row if it was not accepted.
+
+    A row must never be left 'processing' with no job behind it, or the client
+    polls until the stuck-job threshold. A rejected burst says so ("busy, try
+    again") rather than timing out four minutes later with the wrong reason.
+    """
+    try:
+        runner.submit(process_review_task, str(review.id), on_failure=mark_review_failed)
+    except JobRunnerBusyError:
+        logger.warning("Job queue full; review rejected", review_id=str(review.id))
+        return await service.review_repo.mark_failed(review.id, BUSY_MESSAGE)
+    except Exception:  # JobRunnerClosedError during shutdown
+        logger.exception("Failed to enqueue review %s", review.id)
+        return await service.review_repo.mark_failed(review.id, ENQUEUE_FAILED_MESSAGE)
+    return review
+
+
 @router.post(
     "/reviews/",
     response_model=ReviewOut,
@@ -64,14 +84,10 @@ async def create_review(
     payload: ReviewCreate,
     user: AuthUser = Depends(get_current_user),
     service: ReviewService = Depends(get_review_service),
-    arq_pool: ArqRedis = Depends(get_arq_pool),
+    runner: JobRunner = Depends(get_job_runner),
 ) -> ReviewOut:
     review = await service.enqueue_review(payload.session_id, user)
-    try:
-        await arq_pool.enqueue_job("process_review_task", str(review.id))
-    except Exception:
-        logger.exception("Failed to enqueue review %s", review.id)
-        review = await service.review_repo.mark_failed(review.id, ENQUEUE_FAILED_MESSAGE)
+    review = await _submit_review_job(runner, service, review)
     return ReviewOut.model_validate(review)
 
 
@@ -87,14 +103,10 @@ async def retry_review(
     review_id: UUID,
     user: AuthUser = Depends(get_current_user),
     service: ReviewService = Depends(get_review_service),
-    arq_pool: ArqRedis = Depends(get_arq_pool),
+    runner: JobRunner = Depends(get_job_runner),
 ) -> ReviewOut:
     review = await service.retry_review(review_id, user)
-    try:
-        await arq_pool.enqueue_job("process_review_task", str(review.id))
-    except Exception:
-        logger.exception("Failed to enqueue review %s", review.id)
-        review = await service.review_repo.mark_failed(review.id, ENQUEUE_FAILED_MESSAGE)
+    review = await _submit_review_job(runner, service, review)
     return ReviewOut.model_validate(review)
 
 

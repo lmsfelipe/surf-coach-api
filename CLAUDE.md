@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-FastAPI backend for a Surf Coaching Platform. Surfers upload session videos, receive AI-powered coaching reviews (via Google Gemini), and track progress. Auth and media storage are handled by Supabase.
+FastAPI backend for a Surf Coaching Platform. Surfers upload session videos, receive AI-powered coaching reviews (via Google Gemini), and track progress. Auth and media storage are handled by Supabase. Review and training-plan generation runs in the background **inside the API process** (no worker service, no Redis) — see `docs/SPEC_BACKEND_Merge_Worker_Into_API.md` and `docs/SPEC_BACKEND_Job_Queue_Hardening.md`.
 
 ## Commands
 
@@ -58,6 +58,7 @@ alembic downgrade -1
 - `api/` — FastAPI routers (auth, sessions, media, reviews, ai, surfboards, health). Each router maps to a resource.
 - `services/` — Business logic layer. Services receive repository and infrastructure dependencies via constructor injection (not FastAPI `Depends`). Key services: `AuthService`, `SessionsService`, `MediaService`, `AIService` (wraps Gemini), `SurfboardsService`.
 - `repositories/` — Async SQLAlchemy data access. Each repo handles CRUD for its domain model.
+- `jobs.py` — the background tasks themselves (`process_review_task`, `process_training_plan_task`, `sweep_stuck_jobs`) plus the user-facing failure messages. They share the HTTP event loop, so any blocking or CPU-bound step must go through `asyncio.to_thread`.
 - `models/` — SQLAlchemy ORM models inheriting from `app.core.db.Base` (DeclarativeBase).
 - `schemas/` — Pydantic request/response schemas.
 - `core/` — Cross-cutting concerns:
@@ -66,10 +67,13 @@ alembic downgrade -1
   - `deps.py` — FastAPI dependencies: `get_current_user` (JWT verification), `db_session`.
   - `security/` — JWT verification (`verify_supabase_jwt`) and media token signing.
   - `storage.py` — Supabase Storage client wrapper.
-  - `frame_extractor.py` — OpenCV-based video frame extraction.
+  - `jobs.py` — `JobRunner`: in-process background runner with a concurrency cap, a queue limit (`JobRunnerBusyError`), separate wait/run timeouts, the `JOB_DEADLINE` ContextVar that bounds Gemini work, `job.finished` logging, and shutdown draining.
+  - `frame_extractor.py` — OpenCV-based video frame extraction (uses the FFmpeg bundled in the opencv wheel; no system `ffmpeg`).
   - `errors.py` — Custom exceptions and global exception handlers.
 
 **Dependency flow**: Routers instantiate services with repos/clients, then call service methods. Services never import FastAPI directly.
+
+**Background jobs**: a route creates the row, then `runner.submit(task, id, on_failure=mark_*_failed)` (runner injected via `get_job_runner`). The task function owns failure bookkeeping once it starts; the runner marks jobs that never started (queue full, wait timeout, shutdown). The lifespan builds the runner, runs `sweep_stuck_jobs()` once at startup, and drains the runner before disposing the DB engine. A row must never be left `processing` with no job behind it.
 
 ## Testing
 

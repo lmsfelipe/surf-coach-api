@@ -1,14 +1,16 @@
 from uuid import UUID
 
 import structlog
-from arq import ArqRedis
 from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
-from app.core.deps import db_session, get_arq_pool, get_current_user
+from app.core.deps import db_session, get_current_user, get_job_runner
+from app.core.jobs import JobRunner, JobRunnerBusyError
 from app.core.rate_limit import limiter
 from app.core.security.jwt import AuthUser
+from app.jobs import BUSY_MESSAGE, mark_plan_failed, process_training_plan_task
+from app.models.training_plan import TrainingPlan
 from app.repositories.ai import ReviewRepository, TrainingPlanRepository
 from app.repositories.auth import AuthRepository
 from app.schemas.training import (
@@ -36,6 +38,25 @@ def get_training_service(
         training_plan_repo=TrainingPlanRepository(db),
         gemini=gemini,
     )
+
+
+async def _submit_plan_job(
+    runner: JobRunner, service: TrainingService, plan: TrainingPlan
+) -> TrainingPlan:
+    """Hand the plan to the runner, or fail the row if it was not accepted.
+
+    Same rule as reviews: a row must never be left 'processing' with no job
+    behind it, and a burst is reported as "busy" straight away.
+    """
+    try:
+        runner.submit(process_training_plan_task, str(plan.id), on_failure=mark_plan_failed)
+    except JobRunnerBusyError:
+        logger.warning("Job queue full; training plan rejected", plan_id=str(plan.id))
+        return await service.training_plan_repo.mark_failed(plan.id, BUSY_MESSAGE)
+    except Exception:  # JobRunnerClosedError during shutdown
+        logger.exception("Failed to enqueue training plan %s", plan.id)
+        return await service.training_plan_repo.mark_failed(plan.id, ENQUEUE_FAILED_MESSAGE)
+    return plan
 
 
 @router.get(
@@ -66,14 +87,10 @@ async def generate_training_plan(
     payload: GenerateTrainingPlanRequest,
     user: AuthUser = Depends(get_current_user),
     service: TrainingService = Depends(get_training_service),
-    arq_pool: ArqRedis = Depends(get_arq_pool),
+    runner: JobRunner = Depends(get_job_runner),
 ) -> TrainingPlanResponse:
     plan = await service.enqueue_training_plan(payload.review_id, user)
-    try:
-        await arq_pool.enqueue_job("process_training_plan_task", str(plan.id))
-    except Exception:
-        logger.exception("Failed to enqueue training plan %s", plan.id)
-        plan = await service.training_plan_repo.mark_failed(plan.id, ENQUEUE_FAILED_MESSAGE)
+    plan = await _submit_plan_job(runner, service, plan)
     return TrainingPlanResponse.model_validate(plan)
 
 
@@ -89,14 +106,10 @@ async def retry_training_plan(
     plan_id: UUID,
     user: AuthUser = Depends(get_current_user),
     service: TrainingService = Depends(get_training_service),
-    arq_pool: ArqRedis = Depends(get_arq_pool),
+    runner: JobRunner = Depends(get_job_runner),
 ) -> TrainingPlanResponse:
     plan = await service.retry_training_plan(plan_id, user)
-    try:
-        await arq_pool.enqueue_job("process_training_plan_task", str(plan.id))
-    except Exception:
-        logger.exception("Failed to enqueue training plan %s", plan.id)
-        plan = await service.training_plan_repo.mark_failed(plan.id, ENQUEUE_FAILED_MESSAGE)
+    plan = await _submit_plan_job(runner, service, plan)
     return TrainingPlanResponse.model_validate(plan)
 
 

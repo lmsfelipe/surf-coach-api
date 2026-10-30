@@ -10,7 +10,6 @@ RUN apt-get update \
         build-essential \
         libpq-dev \
         libmagic1 \
-        ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 RUN python -m venv "$VIRTUAL_ENV"
 
@@ -47,4 +46,6 @@ COPY alembic.ini ./alembic.ini
 COPY alembic ./alembic
 COPY app ./app
 EXPOSE 8000
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
+# One worker: each uvicorn worker would run its own JobRunner, multiplying the idle
+# RAM this setup exists to cut. Matches railway.json.
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "1"]

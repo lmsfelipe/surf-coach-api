@@ -7,7 +7,8 @@ dependencies = [
     # <0.137: from 0.137 included routers stay nested in app.routes, so slowapi's
     # middleware (<=0.1.10) can't resolve the endpoint and silently exempts every
     # route from RATE_LIMIT_DEFAULT. tests/test_rate_limit.py catches this.
-    "fastapi>=0.115,<0.137",
+    # >=0.121: Depends(scope="function") — the media proxy closes its DB session early.
+    "fastapi>=0.121,<0.137",
     "uvicorn[standard]>=0.30",
     "pydantic>=2.7",
     "pydantic-settings>=2.3",
@@ -23,8 +24,6 @@ dependencies = [
     "python-magic>=0.4",
     "aiofiles>=23.0",
     "python-multipart>=0.0.9",
-    "arq>=0.26",
-    "redis>=5.0",
     "slowapi>=0.1.9",
     "structlog>=24.0",
     "sentry-sdk[fastapi]>=2.0",

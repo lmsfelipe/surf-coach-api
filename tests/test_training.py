@@ -13,21 +13,24 @@ from pydantic import ValidationError
 
 from app.api import ai as ai_api
 from app.core.config import get_settings
-from app.core.deps import get_arq_pool
+from app.core.deps import get_job_runner
 from app.core.errors import (
     AIParseFailedError,
 )
+from app.core.jobs import JobRunnerClosedError
+from app.jobs import BUSY_MESSAGE, mark_plan_failed
 from app.main import app
 from app.models.review import Review
 from app.services.ai import (
+    STUCK_PROCESSING_MESSAGE,
     TrainingContext,
     TrainingPlanOutput,
     TrainingService,
 )
 from tests.fake_deps import (
-    FakeArqPool,
     FakeAuthRepo,
     FakeGeminiService,
+    FakeJobRunner,
     FakeReviewRepo,
     FakeTrainingPlanRepo,
     decimal,
@@ -239,7 +242,7 @@ def training_ctx():
         "reviews": review_repo,
         "plans": plan_repo,
         "gemini": gemini,
-        "arq": FakeArqPool(),
+        "runner": FakeJobRunner(),
     }
 
 
@@ -257,10 +260,10 @@ def _override_training_deps(training_ctx):
     app.dependency_overrides[ai_api.get_training_service] = lambda: _build_training_service(
         training_ctx
     )
-    app.dependency_overrides[get_arq_pool] = lambda: training_ctx["arq"]
+    app.dependency_overrides[get_job_runner] = lambda: training_ctx["runner"]
     yield
     app.dependency_overrides.pop(ai_api.get_training_service, None)
-    app.dependency_overrides.pop(get_arq_pool, None)
+    app.dependency_overrides.pop(get_job_runner, None)
 
 
 async def _create_completed_plan(c: AsyncClient, ctx, user_id: UUID, review_id: UUID) -> dict:
@@ -309,7 +312,7 @@ async def test_generate_training_plan_accepts_and_enqueues(client, training_ctx)
     assert body["status"] == "processing"
     assert body["workouts"] == []
 
-    assert training_ctx["arq"].jobs == [("process_training_plan_task", (body["id"],))]
+    assert training_ctx["runner"].jobs == [("process_training_plan_task", (body["id"],))]
 
 
 @pytest.mark.anyio
@@ -327,8 +330,30 @@ async def test_process_training_plan_fills_in_workouts(client, training_ctx):
 
 
 @pytest.mark.anyio
+async def test_process_training_plan_releases_the_db_connection_before_gemini(training_ctx):
+    """The Gemini call must not hold a session-mode pooler slot idle."""
+    reviews = training_ctx["reviews"]
+    releases_seen: list[int] = []
+    real_generate = training_ctx["gemini"].generate_training_plan
+
+    def _generate(context):
+        releases_seen.append(reviews.releases)
+        return real_generate(context)
+
+    training_ctx["gemini"].generate_training_plan = _generate
+    review = training_ctx["review"]
+    plan = await training_ctx["plans"].create_pending(
+        review_id=review.id, profile_id=training_ctx["user_id"]
+    )
+
+    await _build_training_service(training_ctx).process_training_plan(plan.id)
+
+    assert releases_seen == [1]
+
+
+@pytest.mark.anyio
 async def test_generate_plan_marks_failed_when_enqueue_fails(client, training_ctx):
-    training_ctx["arq"] = FakeArqPool(raise_exc=RuntimeError("redis down"))
+    training_ctx["runner"] = FakeJobRunner(raise_exc=JobRunnerClosedError("shutting down"))
     user_id = training_ctx["user_id"]
     review = training_ctx["review"]
 
@@ -342,6 +367,42 @@ async def test_generate_plan_marks_failed_when_enqueue_fails(client, training_ct
     assert r.status_code == 202
     assert r.json()["status"] == "failed"
     assert r.json()["errorMessage"] == ai_api.ENQUEUE_FAILED_MESSAGE
+
+
+@pytest.mark.anyio
+async def test_generate_plan_marks_failed_when_the_queue_is_full(client, training_ctx):
+    training_ctx["runner"] = FakeJobRunner(busy=True)
+    user_id = training_ctx["user_id"]
+    review = training_ctx["review"]
+
+    async with client as c:
+        r = await c.post(
+            "/api/v1/training-plans/",
+            json={"reviewId": str(review.id)},
+            headers={"Authorization": f"Bearer {_token(user_id)}"},
+        )
+
+    assert r.status_code == 202
+    assert r.json()["status"] == "failed"
+    assert r.json()["errorMessage"] == BUSY_MESSAGE
+    assert training_ctx["runner"].jobs == []
+
+
+@pytest.mark.anyio
+async def test_generate_plan_hands_the_runner_the_matching_failure_hook(client, training_ctx):
+    user_id = training_ctx["user_id"]
+    review = training_ctx["review"]
+
+    async with client as c:
+        r = await c.post(
+            "/api/v1/training-plans/",
+            json={"reviewId": str(review.id)},
+            headers={"Authorization": f"Bearer {_token(user_id)}"},
+        )
+
+    (plan_id, hook) = training_ctx["runner"].failure_hooks[0]
+    assert plan_id == r.json()["id"]
+    assert hook is mark_plan_failed
 
 
 @pytest.mark.anyio
@@ -470,6 +531,74 @@ async def test_get_training_plan_for_review_no_plan_returns_404(client, training
         )
 
     assert r.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Stale 'processing' plans on the read path
+# ---------------------------------------------------------------------------
+
+
+async def _stale_plan(ctx, user_id, *, age_offset_sec: int):
+    plan = await ctx["plans"].create_pending(review_id=ctx["review"].id, profile_id=user_id)
+    threshold = get_settings().STUCK_JOB_THRESHOLD_SEC
+    plan.processing_started_at = datetime.now(tz=UTC) - timedelta(
+        seconds=threshold + age_offset_sec
+    )
+    return plan
+
+
+@pytest.mark.anyio
+async def test_stale_processing_plan_fails_on_read(client, training_ctx):
+    """Only a hard kill leaves a plan like this; without the read-path check the
+    client would poll it until the next restart's sweep."""
+    user_id = training_ctx["user_id"]
+    plan = await _stale_plan(training_ctx, user_id, age_offset_sec=10)
+
+    async with client as c:
+        r = await c.get(
+            f"/api/v1/training-plans/{plan.id}",
+            headers={"Authorization": f"Bearer {_token(user_id)}"},
+        )
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "failed"
+    assert r.json()["errorMessage"] == STUCK_PROCESSING_MESSAGE
+
+
+@pytest.mark.anyio
+async def test_stale_processing_plan_also_fails_when_read_through_its_review(client, training_ctx):
+    user_id = training_ctx["user_id"]
+    review = training_ctx["review"]
+    await _stale_plan(training_ctx, user_id, age_offset_sec=10)
+
+    async with client as c:
+        r = await c.get(
+            f"/api/v1/reviews/{review.id}/training-plan",
+            headers={"Authorization": f"Bearer {_token(user_id)}"},
+        )
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "failed"
+    assert r.json()["errorMessage"] == STUCK_PROCESSING_MESSAGE
+
+
+@pytest.mark.anyio
+async def test_fresh_processing_plan_stays_processing_on_read(client, training_ctx):
+    """Its job may still be waiting for a slot; failing it now would be wrong."""
+    user_id = training_ctx["user_id"]
+    plan = await training_ctx["plans"].create_pending(
+        review_id=training_ctx["review"].id, profile_id=user_id
+    )
+
+    async with client as c:
+        r = await c.get(
+            f"/api/v1/training-plans/{plan.id}",
+            headers={"Authorization": f"Bearer {_token(user_id)}"},
+        )
+
+    assert r.status_code == 200
+    assert r.json()["status"] == "processing"
+    assert r.json()["errorMessage"] is None
 
 
 # ---------------------------------------------------------------------------

@@ -1,7 +1,9 @@
+import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 import sentry_sdk
+import structlog
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from sentry_sdk.integrations.fastapi import FastApiIntegration
@@ -13,19 +15,50 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 from app.api import ai, auth, health, media, reviews, sessions, surfboards
 from app.core.config import get_settings
 from app.core.db import engine
-from app.core.deps import close_arq_pool
 from app.core.errors import register_exception_handlers
+from app.core.jobs import JobRunner
 from app.core.logging import setup_logging
 from app.core.middleware import BodySizeLimitMiddleware, RequestContextMiddleware
 from app.core.rate_limit import limiter, rate_limit_exceeded_handler
+from app.jobs import sweep_stuck_jobs
+
+logger = structlog.get_logger(__name__)
+
+# The sweep is two indexed UPDATEs. Capped so a slow or unreachable database
+# delays boot (and the first request after a cold start) by seconds, not minutes.
+STARTUP_SWEEP_TIMEOUT_SEC = 10.0
+
+
+async def _sweep_on_startup() -> None:
+    """Fail rows a hard-killed process left in 'processing'.
+
+    A container killed with SIGKILL (OOM, host crash) runs no handler, so its
+    rows are only cleaned up here — and Railway always restarts it. Never blocks
+    boot: readiness reports the database separately, and the read-path staleness
+    check covers these rows in the meantime.
+    """
+    try:
+        async with asyncio.timeout(STARTUP_SWEEP_TIMEOUT_SEC):
+            await sweep_stuck_jobs()
+    except Exception:
+        logger.exception("Startup sweep failed; continuing without it")
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    settings = get_settings()
+    app.state.job_runner = JobRunner(
+        max_concurrent=settings.JOBS_MAX_CONCURRENT,
+        max_queued=settings.JOBS_MAX_QUEUED,
+        max_wait_sec=settings.JOB_MAX_WAIT_SEC,
+        timeout_sec=settings.JOB_TIMEOUT_SEC,
+        shutdown_grace_sec=settings.JOB_SHUTDOWN_GRACE_SEC,
+    )
+    await _sweep_on_startup()
     yield
-    # Release the shared Redis pool and DB connection pool so shutdown is clean
-    # and connections are not left dangling against Supabase/Redis.
-    await close_arq_pool()
+    # Drain the jobs before the DB pool goes away: a cancelled job still needs a
+    # connection to mark its row failed.
+    await app.state.job_runner.close()
     await engine.dispose()
 
 

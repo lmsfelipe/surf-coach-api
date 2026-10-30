@@ -15,7 +15,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from jose import jwt
 
-from app.core.deps import close_arq_pool, get_arq_pool, get_current_user
+from app.core.deps import get_current_user
 from app.core.errors import InvalidTokenError, MissingTokenError
 from app.core.security.jwt import AuthUser, _fetch_jwks, _peek_algorithm, verify_supabase_jwt
 from tests.conftest import make_token
@@ -243,57 +243,3 @@ async def test_the_bearer_scheme_is_matched_case_insensitively():
 async def test_a_bearer_header_with_a_bad_token_is_an_invalid_token():
     with pytest.raises(InvalidTokenError):
         await get_current_user(authorization="Bearer not-a-jwt")
-
-
-# ---------------------------------------------------------------------------
-# arq pool lifecycle
-# ---------------------------------------------------------------------------
-
-
-async def test_the_arq_pool_is_created_once_and_reused(monkeypatch):
-    created: list[int] = []
-
-    class _Pool:
-        async def aclose(self):
-            pass
-
-    async def _create_pool(settings):
-        created.append(1)
-        return _Pool()
-
-    monkeypatch.setattr("app.core.deps.create_pool", _create_pool)
-    monkeypatch.setattr("app.core.deps._arq_pool", None)
-
-    first = await get_arq_pool()
-    second = await get_arq_pool()
-
-    assert first is second
-    assert len(created) == 1
-    await close_arq_pool()
-
-
-async def test_closing_the_pool_releases_it_for_recreation(monkeypatch):
-    closed: list[int] = []
-
-    class _Pool:
-        async def aclose(self):
-            closed.append(1)
-
-    async def _create_pool(settings):
-        return _Pool()
-
-    monkeypatch.setattr("app.core.deps.create_pool", _create_pool)
-    monkeypatch.setattr("app.core.deps._arq_pool", None)
-
-    await get_arq_pool()
-    await close_arq_pool()
-
-    assert closed == [1]
-    import app.core.deps as deps
-
-    assert deps._arq_pool is None
-
-
-async def test_closing_an_unopened_pool_is_a_no_op(monkeypatch):
-    monkeypatch.setattr("app.core.deps._arq_pool", None)
-    await close_arq_pool()  # must not raise

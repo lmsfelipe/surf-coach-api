@@ -43,6 +43,18 @@ def get_media_service(
     )
 
 
+def get_media_stream_service(
+    db: AsyncSession = Depends(db_session, scope="function"),
+    storage: StorageClient = Depends(get_storage_client),
+    frame_extractor: FrameExtractor = Depends(get_frame_extractor),
+) -> MediaService:
+    # The proxy keeps streaming for as long as the video plays. A request-scoped
+    # session would hold its pooled connection (idle in transaction) until the last
+    # byte is sent, so a few open players exhaust Supabase's session-mode pooler.
+    # Function scope closes the session once the ownership lookup returns.
+    return get_media_service(db, storage, frame_extractor)
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
@@ -173,7 +185,7 @@ async def stream_media_content(
     request: Request,
     media_id: UUID,
     token: str = Query(...),
-    service: MediaService = Depends(get_media_service),
+    service: MediaService = Depends(get_media_stream_service),
     storage: StorageClient = Depends(get_storage_client),
 ) -> StreamingResponse:
     """Stream media bytes from private storage.

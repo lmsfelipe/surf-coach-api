@@ -23,8 +23,8 @@ from decimal import Decimal
 from uuid import uuid4
 
 import pytest
-from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import event, text
+from sqlalchemy.exc import IntegrityError, InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -218,6 +218,57 @@ async def test_deleting_a_session_removes_it(db, profile_id):
     assert await repo.get(session.id) is None
 
 
+async def test_sessions_list_joins_each_review_in_one_query(db, profile_id):
+    repo = SessionsRepository(db)
+    reviewed = await _make_session(db, profile_id, session_date=date(2026, 4, 20))
+    await _make_session(db, profile_id, session_date=date(2026, 4, 10))
+    review = await ReviewRepository(db).create_pending(
+        session_id=reviewed.id, profile_id=profile_id
+    )
+    db.expunge_all()  # load from SQL, not from the identity map
+
+    statements: list[str] = []
+
+    def _count(conn, cursor, statement, *args):
+        statements.append(statement)
+
+    sync_engine = db.bind.sync_engine if hasattr(db.bind, "sync_engine") else db.bind
+    event.listen(sync_engine, "before_cursor_execute", _count)
+    try:
+        sessions = await repo.list_for_profile(profile_id)
+        reviews = [s.review for s in sessions]
+    finally:
+        event.remove(sync_engine, "before_cursor_execute", _count)
+
+    assert [r.id if r else None for r in reviews] == [review.id, None]
+    assert reviews[0].status == "processing"
+    assert len(statements) == 1
+
+
+async def test_a_single_session_never_lazy_loads_its_review(db, profile_id):
+    """lazy="raise": an un-joined review access fails loudly instead of an N+1."""
+    session = await _make_session(db, profile_id)
+    db.expunge_all()
+
+    loaded = await SessionsRepository(db).get(session.id)
+
+    with pytest.raises(InvalidRequestError):
+        _ = loaded.review
+
+
+async def test_deleting_a_reviewed_session_cascades_to_its_review(db, profile_id):
+    """The relationship is viewonly, so the delete must not need the review loaded."""
+    session = await _make_session(db, profile_id)
+    review = await ReviewRepository(db).create_pending(session_id=session.id, profile_id=profile_id)
+    db.expunge_all()
+    repo = SessionsRepository(db)
+
+    await repo.delete(await repo.get(session.id))
+    db.expunge_all()
+
+    assert await ReviewRepository(db).get(review.id) is None
+
+
 async def test_a_session_cannot_reference_a_missing_profile(db):
     """The FK is the last line of defence behind the service-level ownership check."""
     with pytest.raises(IntegrityError):
@@ -348,8 +399,10 @@ async def test_a_video_row_keeps_its_duration_precision(db, profile_id):
     assert (await repo.get(media.id)).duration_seconds == Decimal("12.34")
 
 
-async def test_optimize_attempts_defaults_to_zero(db, profile_id):
-    """The poison-pill guard counts up from this server default."""
+async def test_the_unused_optimizer_columns_still_default_cleanly(db, profile_id):
+    """Nothing writes these since the server-side optimizer was removed; the
+    columns stay until a later migration drops them, so an insert must not need
+    them."""
     session = await _make_session(db, profile_id)
     media = await MediaRepository(db).create(**await _media_kwargs(session.id))
 
@@ -417,105 +470,6 @@ async def test_deleting_a_session_cascades_to_its_media(db, profile_id):
     await SessionsRepository(db).delete(session)
 
     assert await media_repo.get(media.id) is None
-
-
-async def test_mark_optimized_stamps_the_time_and_new_size(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-
-    await repo.mark_optimized(media.id, 512)
-
-    # mark_optimized issues raw SQL that bypasses the ORM, so the row is read
-    # back the same way rather than through the (now stale) identity map.
-    row = (
-        await db.execute(
-            text("SELECT optimized_at, file_size_bytes FROM public.media WHERE id = :id"),
-            {"id": str(media.id)},
-        )
-    ).one()
-    assert row.optimized_at is not None
-    assert row.file_size_bytes == 512
-
-
-async def test_increment_optimize_attempts_accumulates(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-
-    await repo.increment_optimize_attempts(media.id)
-    await repo.increment_optimize_attempts(media.id)
-
-    attempts = await db.scalar(
-        text("SELECT optimize_attempts FROM public.media WHERE id = :id"), {"id": str(media.id)}
-    )
-    assert attempts == 2
-
-
-async def test_the_optimize_sweep_respects_the_grace_period(db, profile_id):
-    """A just-uploaded video is still within its grace window, so it is not swept."""
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-    await _backdate(db, "media", media.id, 600)  # ten minutes old
-
-    within_grace = await repo.list_unoptimized_videos(older_than_sec=900, limit=10, max_attempts=3)
-    assert media.id not in {m.id for m in within_grace}
-
-    past_grace = await repo.list_unoptimized_videos(older_than_sec=300, limit=10, max_attempts=3)
-    assert media.id in {m.id for m in past_grace}
-
-
-async def test_the_optimize_sweep_skips_images(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    image = await repo.create(**await _media_kwargs(session.id, media_type="image"))
-    await _backdate(db, "media", image.id, 3600)
-
-    rows = await repo.list_unoptimized_videos(older_than_sec=0, limit=10, max_attempts=3)
-
-    assert image.id not in {m.id for m in rows}
-
-
-async def test_the_optimize_sweep_skips_already_optimized_videos(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-    await _backdate(db, "media", media.id, 3600)
-    await repo.mark_optimized(media.id, 100)
-
-    rows = await repo.list_unoptimized_videos(older_than_sec=0, limit=10, max_attempts=3)
-
-    assert media.id not in {m.id for m in rows}
-
-
-async def test_the_optimize_sweep_gives_up_after_max_attempts(db, profile_id):
-    """The poison-pill guard: a video that keeps failing must stop being re-enqueued."""
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-    await _backdate(db, "media", media.id, 3600)
-
-    for _ in range(2):
-        await repo.increment_optimize_attempts(media.id)
-    still_eligible = await repo.list_unoptimized_videos(older_than_sec=0, limit=10, max_attempts=3)
-    assert media.id in {m.id for m in still_eligible}
-
-    await repo.increment_optimize_attempts(media.id)  # third strike
-    exhausted = await repo.list_unoptimized_videos(older_than_sec=0, limit=10, max_attempts=3)
-    assert media.id not in {m.id for m in exhausted}
-
-
-async def test_the_optimize_sweep_honours_its_batch_limit(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    for i in range(5):
-        media = await repo.create(
-            **await _media_kwargs(session.id, media_type="video", file_name=f"{i}.mp4")
-        )
-        await _backdate(db, "media", media.id, 3600)
-
-    assert len(await repo.list_unoptimized_videos(older_than_sec=0, limit=2, max_attempts=3)) == 2
 
 
 # ---------------------------------------------------------------------------

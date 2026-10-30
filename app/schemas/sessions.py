@@ -31,3 +31,18 @@ class SessionOut(_CamelModel):
     notes: str | None = None
     created_at: datetime
     updated_at: datetime
+
+
+class SessionReviewSummary(_CamelModel):
+    """Just enough of a review for a list row: its score, or that it is still running."""
+
+    id: UUID
+    status: str
+    overall_score: float | None = None
+
+
+class SessionListItemOut(SessionOut):
+    """A row of GET /sessions/. Carries the review summary so the list needs no
+    per-session GET /sessions/{id}/review."""
+
+    review: SessionReviewSummary | None = None

@@ -20,7 +20,13 @@ from app.core.errors import (
     ReviewNotRetryableError,
 )
 from app.core.security.jwt import AuthUser
-from app.services.ai import ReviewOutput, ReviewService, ScoreRubric, normalise_scores
+from app.services.ai import (
+    STUCK_PROCESSING_MESSAGE,
+    ReviewOutput,
+    ReviewService,
+    ScoreRubric,
+    normalise_scores,
+)
 from tests.fake_deps import (
     FakeAuthRepo,
     FakeFrameExtractor,
@@ -152,6 +158,36 @@ async def test_whitespace_only_notes_skip_the_refinement_pass(ctx):
     session = await seed_session(ctx, user_id, notes="\n  \t ")
     await process(ctx, session, user_id)
     assert ctx["gemini"].refine_calls == []
+
+
+class _ConnectionCheckingGemini(FakeGeminiService):
+    """Records how many times the review repo released its connection per call."""
+
+    def __init__(self, output, reviews) -> None:
+        super().__init__(output)
+        self._reviews = reviews
+        self.releases_seen: list[int] = []
+
+    def analyze_surf_media(self, images, context):
+        self.releases_seen.append(self._reviews.releases)
+        return super().analyze_surf_media(images, context)
+
+
+async def test_the_db_connection_is_released_before_the_gemini_call(ctx):
+    """Downloads + Gemini take minutes; holding a session-mode pooler slot idle
+    through them exhausts Supabase's connection cap (EMAXCONNSESSION)."""
+    user_id = uuid4()
+    ctx["gemini"] = _ConnectionCheckingGemini(make_review_output(), ctx["reviews"])
+    board = await ctx["surfboards"].create(
+        profile_id=user_id, board_type="fish", board_size=5.8, volume=None, label=None
+    )
+    session = await seed_session(ctx, user_id, surfboard_id=board.id)
+
+    await process(ctx, session, user_id)
+
+    assert ctx["gemini"].releases_seen == [1]
+    # The board lookup moved ahead of the release but still reaches the prompt.
+    assert ctx["gemini"].calls[0][1].board_type == "fish"
 
 
 @pytest.mark.parametrize("failure", [AIGenerationFailedError, AIParseFailedError])
@@ -451,7 +487,7 @@ async def test_a_naive_processing_timestamp_is_treated_as_utc(ctx):
     )
 
     assert out.status == "failed"
-    assert out.error_message == ReviewService.STUCK_PROCESSING_MESSAGE
+    assert out.error_message == STUCK_PROCESSING_MESSAGE
 
 
 async def test_review_for_session_rejects_another_users_session(ctx):

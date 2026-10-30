@@ -1,8 +1,9 @@
 """Retry endpoints for reviews and training plans.
 
-The retry routes reset a failed row to 'processing' and then enqueue the job. If
-the enqueue itself fails, the row must be put back to 'failed' — otherwise it
-sits in 'processing' with no job behind it and the client polls forever.
+The retry routes reset a failed row to 'processing' and then submit the job. If
+the submit is refused — the runner is draining, or its queue is full — the row
+must be put back to 'failed', otherwise it sits in 'processing' with no job
+behind it and the client polls forever.
 """
 
 from __future__ import annotations
@@ -14,15 +15,17 @@ import pytest
 
 from app.api import ai as ai_api
 from app.api import reviews as reviews_api
-from app.core.deps import get_arq_pool
+from app.core.deps import get_job_runner
+from app.core.jobs import JobRunnerClosedError
+from app.jobs import BUSY_MESSAGE
 from app.main import app
 from app.services.ai import ReviewService, TrainingService
 from tests.conftest import make_token
 from tests.fake_deps import (
-    FakeArqPool,
     FakeAuthRepo,
     FakeFrameExtractor,
     FakeGeminiService,
+    FakeJobRunner,
     FakeMediaRepo,
     FakeReviewRepo,
     FakeSessionsRepo,
@@ -50,14 +53,21 @@ def ctx():
         "storage": FakeStorageClient(),
         "frames": FakeFrameExtractor(frames=[b"f1"]),
         "gemini": gemini,
-        "arq": FakeArqPool(),
+        "runner": FakeJobRunner(),
     }
 
 
 @pytest.fixture
-def arq_fails(ctx):
-    """Swap in a pool whose enqueue raises, as if Redis were unreachable."""
-    ctx["arq"] = FakeArqPool(raise_exc=ConnectionError("redis unreachable"))
+def submit_fails(ctx):
+    """Swap in a runner that refuses work, as it does while shutting down."""
+    ctx["runner"] = FakeJobRunner(raise_exc=JobRunnerClosedError("shutting down"))
+    return ctx
+
+
+@pytest.fixture
+def runner_busy(ctx):
+    """Swap in a runner whose wait queue is full."""
+    ctx["runner"] = FakeJobRunner(busy=True)
     return ctx
 
 
@@ -79,9 +89,9 @@ def _override(ctx):
         training_plan_repo=ctx["plans"],  # type: ignore[arg-type]
         gemini=ctx["gemini"],  # type: ignore[arg-type]
     )
-    app.dependency_overrides[get_arq_pool] = lambda: ctx["arq"]
+    app.dependency_overrides[get_job_runner] = lambda: ctx["runner"]
     yield
-    for dep in (reviews_api.get_review_service, ai_api.get_training_service, get_arq_pool):
+    for dep in (reviews_api.get_review_service, ai_api.get_training_service, get_job_runner):
         app.dependency_overrides.pop(dep, None)
 
 
@@ -118,14 +128,14 @@ async def test_retry_review_resets_to_processing_and_enqueues(client, ctx, auth_
     assert r.status_code == 202
     assert r.json()["status"] == "processing"
     assert r.json()["errorMessage"] is None
-    assert ctx["arq"].jobs == [("process_review_task", (str(review.id),))]
+    assert ctx["runner"].jobs == [("process_review_task", (str(review.id),))]
 
 
 async def test_retry_review_marks_failed_when_the_enqueue_fails(
-    client, arq_fails, auth_headers, user_id
+    client, submit_fails, auth_headers, user_id
 ):
-    """No worker will ever pick this up, so the row must not be left processing."""
-    ctx = arq_fails
+    """No job will ever pick this up, so the row must not be left processing."""
+    ctx = submit_fails
     review = await _failed_review(ctx, user_id)
 
     async with client as c:
@@ -136,6 +146,23 @@ async def test_retry_review_marks_failed_when_the_enqueue_fails(
     assert body["status"] == "failed"
     assert body["errorMessage"] == ENQUEUE_FAILED
     assert (await ctx["reviews"].get(review.id)).status == "failed"
+
+
+async def test_retry_review_is_rejected_when_the_queue_is_full(
+    client, runner_busy, auth_headers, user_id
+):
+    """A retry during a burst is refused fast instead of queueing behind everyone."""
+    ctx = runner_busy
+    review = await _failed_review(ctx, user_id)
+
+    async with client as c:
+        r = await c.post(f"/api/v1/reviews/{review.id}/retry", headers=auth_headers)
+
+    assert r.status_code == 202
+    body = r.json()
+    assert body["status"] == "failed"
+    assert body["errorMessage"] == BUSY_MESSAGE
+    assert ctx["runner"].jobs == []
 
 
 @pytest.mark.parametrize("status_value", ["completed", "processing"])
@@ -149,7 +176,7 @@ async def test_retry_review_is_refused_unless_it_failed(
         r = await c.post(f"/api/v1/reviews/{review.id}/retry", headers=auth_headers)
 
     assert r.status_code == 409
-    assert ctx["arq"].jobs == []
+    assert ctx["runner"].jobs == []
 
 
 async def test_retry_review_rejects_another_user(client, ctx, auth_headers, user_id):
@@ -159,7 +186,7 @@ async def test_retry_review_rejects_another_user(client, ctx, auth_headers, user
         r = await c.post(f"/api/v1/reviews/{review.id}/retry", headers=auth_headers)
 
     assert r.status_code == 403
-    assert ctx["arq"].jobs == []
+    assert ctx["runner"].jobs == []
 
 
 async def test_retry_unknown_review_returns_404(client, ctx, auth_headers):
@@ -188,13 +215,13 @@ async def test_retry_plan_resets_to_processing_and_enqueues(client, ctx, auth_he
 
     assert r.status_code == 202
     assert r.json()["status"] == "processing"
-    assert ctx["arq"].jobs == [("process_training_plan_task", (str(plan.id),))]
+    assert ctx["runner"].jobs == [("process_training_plan_task", (str(plan.id),))]
 
 
 async def test_retry_plan_marks_failed_when_the_enqueue_fails(
-    client, arq_fails, auth_headers, user_id
+    client, submit_fails, auth_headers, user_id
 ):
-    ctx = arq_fails
+    ctx = submit_fails
     plan = await _failed_plan(ctx, user_id)
 
     async with client as c:
@@ -204,6 +231,21 @@ async def test_retry_plan_marks_failed_when_the_enqueue_fails(
     assert r.json()["status"] == "failed"
     assert r.json()["errorMessage"] == ENQUEUE_FAILED
     assert (await ctx["plans"].get_by_id(plan.id)).status == "failed"
+
+
+async def test_retry_plan_is_rejected_when_the_queue_is_full(
+    client, runner_busy, auth_headers, user_id
+):
+    ctx = runner_busy
+    plan = await _failed_plan(ctx, user_id)
+
+    async with client as c:
+        r = await c.post(f"/api/v1/training-plans/{plan.id}/retry", headers=auth_headers)
+
+    assert r.status_code == 202
+    assert r.json()["status"] == "failed"
+    assert r.json()["errorMessage"] == BUSY_MESSAGE
+    assert ctx["runner"].jobs == []
 
 
 @pytest.mark.parametrize("status_value", ["completed", "processing"])
@@ -217,7 +259,7 @@ async def test_retry_plan_is_refused_unless_it_failed(
         r = await c.post(f"/api/v1/training-plans/{plan.id}/retry", headers=auth_headers)
 
     assert r.status_code == 409
-    assert ctx["arq"].jobs == []
+    assert ctx["runner"].jobs == []
 
 
 async def test_retry_plan_rejects_another_user(client, ctx, auth_headers, user_id):

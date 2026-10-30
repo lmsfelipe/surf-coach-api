@@ -1,10 +1,10 @@
-# DEPLOY — Production Runbook (UI + API + Worker)
+# DEPLOY — Production Runbook (UI + API)
 
 **Status:** Ready to execute
 **Owner:** Backend
 **Date:** 2026-07-22
 **Target scale:** ≤100 active users at launch
-**Related:** `SPEC_BACKEND_Video_Optimization.md`, `SPEC_BACKEND_Async_Review_Processing.md`, `SPEC_BACKEND_Media_Proxy.md`
+**Related:** `SPEC_BACKEND_Merge_Worker_Into_API.md`, `SPEC_BACKEND_Job_Queue_Hardening.md`, `SPEC_BACKEND_Media_Proxy.md`
 
 ---
 
@@ -13,28 +13,32 @@
 | Component | Repo | Platform | Notes |
 |---|---|---|---|
 | **UI** (Vite/React SPA) | `surf-coach-ui` | **Cloudflare Pages** | Static `dist/`, free tier, global CDN |
-| **API** (FastAPI) | `surf-coach-api` | **Railway** service #1 | Dockerfile `prod` stage; runs migrations |
-| **Worker** (arq) | `surf-coach-api` | **Railway** service #2 | Same image, different start command |
+| **API** (FastAPI) | `surf-coach-api` | **Railway** service #1 (the only one) | Dockerfile `prod` stage; runs migrations **and** background jobs |
 | **Postgres** | — | **Supabase** (existing) | Session pooler; no separate managed DB |
-| **Redis** | — | **Railway** plugin | arq job queue |
 | **Auth + Storage** | — | **Supabase** (existing) | JWT + `surf-media` / `profile-media` buckets |
 | **Gemini** | — | Google AI | `gemini-2.0-flash` |
 | **Errors** | — | Sentry (optional) | `SENTRY_DSN` empty = disabled |
 
-Expected cost: **~$12–20/mo** at launch, rising to ~$40/mo once Supabase Pro is
-needed for video storage.
+There is no worker service and no Redis: reviews and training plans run inside
+the API process behind an in-process `JobRunner`. With nothing polling, the
+service produces no outbound traffic when idle, so Railway **Serverless** puts it
+to sleep (§17) and an idle day costs ≈ $0.
+
+Expected cost: **a few $/mo** at launch (mostly active-minute RAM), rising to
+~$25–30/mo once Supabase Pro is needed for video storage.
 
 ## 2. Pre-flight — already verified in the repos
 
-- [x] `ffmpeg` installed in the Dockerfile `base` stage (inherited by `prod`).
 - [x] Dockerfile installs deps from `uv.lock` (`uv sync --locked`, hash-verified) —
       every build ships the exact versions CI tested, and `prod` gets runtime deps
       only, no test/lint tools. See §16.
-- [x] `railway.json` (API) and `railway.worker.json` (worker) committed.
+- [x] `railway.json` committed (one service; `--workers 1`).
 - [x] `ALLOWED_HOSTS` setting exists and is honored in `app/main.py`
       (**fail-open** when unset — an unset var cannot 400 the whole deploy).
 - [x] `public/_redirects` committed in the UI repo (SPA deep-link fallback).
-- [x] Migrations through `0013_add_media_optimized_at.py` present.
+- [x] Migrations through `0013_add_media_optimized_at.py` present. `media.optimized_at`
+      and `optimize_attempts` are unused since the server-side optimizer was removed;
+      they stay until a later migration drops them.
 - [x] Both repos pushed to GitHub (`lmsfelipe/surf-coach-api`, `lmsfelipe/surf-coach-ui`).
 
 ## 3. Decide before starting
@@ -45,7 +49,7 @@ needed for video storage.
    at the feature branch. **The rest of this runbook assumes `main`.**
 2. **Region.** Pick the **same region** for Railway and the Supabase project
    (e.g. both `us-east`). Cross-region adds latency to every DB call and every
-   worker media download.
+   media download a job makes.
 3. **Domains.** Custom domains are optional for launch — the generated
    `*.up.railway.app` and `*.pages.dev` URLs work fine. Adding them later only
    requires updating `CORS_ORIGINS`, `ALLOWED_HOSTS`, `VITE_API_BASE_URL`, and
@@ -54,18 +58,14 @@ needed for video storage.
 ## 4. Deploy order — and why it matters
 
 ```
-Supabase (DB/buckets/auth)  →  Redis  →  API  →  Worker  →  Frontend  →  Wire-back
+Supabase (DB/buckets/auth)  →  API  →  Frontend  →  Wire-back
 ```
 
-Three hard ordering constraints:
+Two hard ordering constraints:
 
-- **Redis before API/worker.** `WorkerSettings.redis_settings` is evaluated at
-  *import* time (`RedisSettings.from_dsn(...)`, `app/worker.py:154`). A missing
-  or malformed `REDIS_URL` crashes the worker on boot, not at first job.
-- **API before worker.** Migrations run *only* on the API service
-  (`preDeployCommand: alembic upgrade head`). The worker's optimize sweep
-  queries `media.optimized_at` (migration `0013`); starting it against an
-  un-migrated DB errors every 5 minutes.
+- **Supabase before the API.** Migrations run as the API's
+  `preDeployCommand: alembic upgrade head`, and the app needs the project keys to
+  construct `Settings` at import time.
 - **Frontend after API**, because it needs `VITE_API_BASE_URL` baked in at
   build time (Vite inlines `VITE_*` — changing it later requires a rebuild).
 
@@ -98,19 +98,27 @@ redeploy the API (§9). Leave `ALLOWED_HOSTS` **unset** for the initial bring-up
      change. (If you *must* use transaction mode/6543, `app/core/db.py` needs
      `connect_args={"statement_cache_size": 0, "prepared_statement_cache_size": 0}`
      on `create_async_engine` — session mode avoids the change.)
+   - **Connection budget.** Session mode caps *every* client of the project at
+     the pooler's pool size — **15** by default (Database → Settings →
+     Connection pooling). Each pooled connection the app holds counts, idle or
+     not, and an over-cap connect fails with `EMAXCONNSESSION … max clients
+     reached in session mode`. One process now serves HTTP **and** jobs from a
+     single pool of `DB_POOL_SIZE + DB_MAX_OVERFLOW` (5 + 0 by default), leaving
+     plenty of room for the pre-deploy migration and a redeploy's overlap. Jobs
+     release their connection across downloads and Gemini, so
+     `JOBS_MAX_CONCURRENT` (2) fits easily — but keep
+     `JOBS_MAX_CONCURRENT + concurrent HTTP DB use ≤ DB_POOL_SIZE` if you raise it.
 3. **Keys.** Grab `SUPABASE_URL`, anon key, service-role key, and the JWT secret
    (Settings → API).
 4. Leave auth redirect URLs for §9 (needs the Pages domain).
 
-## 6. Phase 2 — Redis
+## 6. Phase 2 — (removed)
 
-Railway project → **New → Database → Redis**. Copy the **private** connection
-URL (service-to-service over Railway's internal network — no public egress).
-This becomes `REDIS_URL` for both the API and the worker.
-
-> Cost note: Upstash's free tier is the ~$0 alternative, but arq holds blocking
-> pops on a long-lived connection, which suits a real Redis better. At a few
-> dollars a month, Railway Redis is the safer default for a job queue.
+There is no Redis and no worker service any more. If you are migrating an
+existing deployment, follow the rollout in
+`docs/SPEC_BACKEND_Merge_Worker_Into_API.md` §6: deploy the API, smoke-test,
+remove the worker service, keep Redis for about a week as a rollback path, then
+delete it and the `REDIS_URL` shared variable.
 
 ## 7. Phase 3 — API service
 
@@ -120,33 +128,27 @@ This becomes `REDIS_URL` for both the API and the worker.
    - `preDeployCommand: alembic upgrade head`
    - `startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT --workers 1`
    - `healthcheckPath: /health`, `numReplicas: 1`
-3. Set env vars (§11). **Set `VIDEO_OPTIMIZE_ENABLED=false` for now** — per the
-   video spec's rollout, ship it disabled and enable after smoke-testing (§10).
+3. Set env vars (§13).
 4. **Settings → Networking → Generate Domain.** Record it — this is
    `VITE_API_BASE_URL` for the frontend.
-5. Verify: the deploy log shows alembic running to `0013`, and the health check
-   goes green.
+5. **Settings → Serverless: on**, and set `RAILWAY_DEPLOYMENT_DRAINING_SECONDS`
+   to at least `JOB_SHUTDOWN_GRACE_SEC + 5` (30 with the defaults) so a redeploy
+   can drain its jobs instead of being SIGKILLed mid-drain (§17).
+6. Verify: the deploy log shows alembic running to `0013`, the startup sweep line
+   appears once, and the health check goes green.
 
 ```bash
 curl -s https://<your-api>.up.railway.app/health
 ```
 
-> `numReplicas: 1` is deliberate: it keeps the Supabase session-mode connection
-> count small and avoids two instances racing the pre-deploy migration.
+> `numReplicas: 1` and `--workers 1` are deliberate: each uvicorn worker would
+> run its own `JobRunner` and its own DB pool, multiplying idle RAM and the
+> Supabase session-mode connection count, and two instances would race the
+> pre-deploy migration.
 
-## 8. Phase 4 — Worker service
+## 8. Phase 4 — (removed)
 
-1. In the **same Railway project**: **New → GitHub repo → `surf-coach-api`**
-   again. This creates a second service from the same repo.
-2. In that service's settings, set the **config-as-code path** to
-   **`railway.worker.json`** — this is the step that makes it a worker
-   (`startCommand: arq app.worker.WorkerSettings`, no migrations, no health check).
-3. Give it the **same env vars as the API** (§11). Use Railway **shared
-   variables** at the project level so the two services can't drift.
-4. **Do not** generate a public domain — the worker serves no HTTP.
-5. Verify from the deploy logs: arq starts and registers the cron jobs
-   (`sweep_stuck_jobs` every minute, `sweep_unoptimized_media` every 5 minutes,
-   both `run_at_startup=True`).
+Jobs run in the API process. Nothing to deploy here.
 
 ## 9. Phase 5 — Frontend (Cloudflare Pages)
 
@@ -188,42 +190,35 @@ Run top to bottom against production:
 - [ ] Create a session; upload a video (confirms storage write + moderation +
       duration probe).
 - [ ] Request a review → status goes `processing` → `completed` inside the
-      5-minute polling window (confirms Redis, worker, Gemini end-to-end).
+      5-minute polling window (confirms the job runner and Gemini end-to-end).
 - [ ] **Replay the video** — it plays and seeks (confirms the media proxy +
       Range requests).
-- [ ] Generate a training plan (confirms the second worker task).
-- [ ] Kill the worker service mid-review → the row lands `failed` with a retry
-      button within `STUCK_JOB_THRESHOLD_SEC` + 60s (confirms the sweeper).
+- [ ] Generate a training plan (confirms the second task).
+- [ ] `GET /health/live` stays fast (< 100 ms) while a review is running —
+      confirms the heavy steps are off the event loop.
+- [ ] Redeploy mid-review → the row lands `failed` with "Processing was
+      interrupted." within `JOB_SHUTDOWN_GRACE_SEC` (confirms the drain), and a
+      Retry works.
+- [ ] After ≥ 15 min with no traffic, the Railway service shows **Sleeping** (§17).
 - [ ] Check browser console/network for CORS errors (confirms `CORS_ORIGINS`).
 
-## 12. Phase 8 — Enable video optimization
+## 12. Phase 8 — (removed)
 
-Only after §11 passes:
-
-1. Set `VIDEO_OPTIMIZE_ENABLED=true` on **both** API and worker; redeploy.
-2. Confirm `ffmpeg` is present in the worker container and the cron is live.
-3. Upload landscape, portrait, and iPhone HEVC/`.mov` clips. After
-   `VIDEO_OPTIMIZE_GRACE_SEC` (900s default) plus one sweep tick, check worker
-   logs for the reduction line (`optimize: media … -> … bytes (-NN%)`).
-4. **Re-verify replay** on an optimized video — this is the acceptance gate:
-   same media id, same URL, smaller file, still seekable.
-5. Watch the first sweep cycles: any pre-existing videos have
-   `optimized_at = NULL` and will be compressed gradually, throttled by
-   `VIDEO_OPTIMIZE_BATCH` (20/tick). Expect a one-time egress bump as the
-   backlog is downloaded to the worker once.
-6. Tune `VIDEO_CRF` / `VIDEO_TARGET_HEIGHT` if quality or size needs adjusting.
+Videos are compressed in the browser before upload (Mediabunny/WebCodecs, 720p),
+so there is no server-side transcode to enable. The optimizer and its periodic
+sweep were removed with the worker: a sweep on a timer would keep the service
+awake, which is exactly what §17 trades away.
 
 ---
 
 ## 13. Environment variables
 
-### API + Worker (identical — use Railway shared variables)
+### API
 
 | Variable | Value / note |
 |---|---|
 | `APP_ENV` | `production` |
 | `DATABASE_URL` | `postgresql+asyncpg://…@…pooler.supabase.com:5432/postgres` (session mode) |
-| `REDIS_URL` | Railway Redis **private** URL |
 | `SUPABASE_URL` / `SUPABASE_ANON_KEY` / `SUPABASE_SERVICE_ROLE_KEY` / `SUPABASE_JWT_SECRET` | from Supabase |
 | `SUPABASE_BUCKET` | `surf-media` |
 | `GEMINI_API_KEY` | Google AI key |
@@ -232,16 +227,33 @@ Only after §11 passes:
 | `ALLOWED_HOSTS` | leave **unset** initially (fail-open) |
 | `SENTRY_DSN` | optional; empty disables |
 | `LOG_LEVEL` | `INFO` |
-| `VIDEO_OPTIMIZE_ENABLED` | `false` at first deploy → `true` in §12 |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` | leave at `5` / `0` — sized for Supabase's session-mode cap (§5) |
+| `RAILWAY_DEPLOYMENT_DRAINING_SECONDS` | ≥ `JOB_SHUTDOWN_GRACE_SEC + 5` (30 with the defaults) — see §17 |
 | `PORT` | injected by Railway — do not set |
 
 Defaults that need no override unless tuning: `FRAME_EXTRACT_COUNT`,
-`MAX_UPLOAD_SIZE_MB`, `MAX_UPLOAD_FILES`, `MIN_UPLOAD_PHOTOS`, `MAX_UPLOAD_PHOTOS`, `MAX_UPLOAD_VIDEOS`,
-`MAX_VIDEO_DURATION_SEC`, `TRAINING_WORKOUTS_PER_PLAN`,
-`CONTENT_MODERATION_ENABLED`, `WORKER_MAX_JOBS`, `WORKER_JOB_TIMEOUT_SEC`,
-`STUCK_JOB_THRESHOLD_SEC`, `RATE_LIMIT_*`, `VIDEO_TARGET_HEIGHT`, `VIDEO_CRF`,
-`VIDEO_KEEP_AUDIO`, `VIDEO_AUDIO_BITRATE_KBPS`, `VIDEO_OPTIMIZE_GRACE_SEC`,
-`VIDEO_OPTIMIZE_BATCH`.
+`MAX_UPLOAD_SIZE_MB`, `MAX_UPLOAD_FILES`, `MIN_UPLOAD_PHOTOS`, `MAX_UPLOAD_PHOTOS`,
+`MAX_UPLOAD_VIDEOS`, `MAX_VIDEO_DURATION_SEC`, `TRAINING_WORKOUTS_PER_PLAN`,
+`CONTENT_MODERATION_ENABLED`, `RATE_LIMIT_*`, and the job/Gemini budget below.
+
+**Job runner** (all optional; the defaults are safe and the app refuses to boot on
+an inconsistent combination):
+
+| Variable | Default | Note |
+|---|---|---|
+| `JOBS_MAX_CONCURRENT` | `2` | Jobs running at once. Each review holds video bytes + frames in RAM, in the container that also serves HTTP. |
+| `JOBS_MAX_QUEUED` | `4` | Jobs allowed to wait for a slot; past this a submit is rejected and the row reads "busy, try again". |
+| `JOB_MAX_WAIT_SEC` | `60` | Cap on the wait part of the budget, so a job that starts has `JOB_TIMEOUT_SEC − JOB_MAX_WAIT_SEC` left to run. |
+| `JOB_TIMEOUT_SEC` | `240` | Total budget from submit (wait + run). Must stay under `STUCK_JOB_THRESHOLD_SEC`. |
+| `JOB_SHUTDOWN_GRACE_SEC` | `25` | How long a redeploy waits for running jobs. |
+| `STUCK_JOB_THRESHOLD_SEC` | `300` | Age at which the startup sweep and the read-path check fail a `processing` row. |
+| `GEMINI_REQUEST_TIMEOUT_SEC` | `90` | Per-attempt HTTP timeout; a Gemini thread cannot be cancelled, so without it a hung call outlives its job. |
+| `GEMINI_MIN_ATTEMPT_SEC` | `10` | Don't start (or retry into) an attempt with less budget left than this. |
+| `GEMINI_DEADLINE_MARGIN_SEC` | `5` | Stop Gemini work this long before the job deadline. |
+
+After a week of traffic, tune from the `job.finished` logs: take p95 `run_sec` as
+`R`, pick `JOBS_MAX_CONCURRENT` from RAM headroom, then
+`JOBS_MAX_QUEUED ≈ JOBS_MAX_CONCURRENT × JOB_MAX_WAIT_SEC / R`.
 
 ### Frontend (Cloudflare Pages)
 
@@ -261,29 +273,30 @@ Defaults that need no override unless tuning: `FRAME_EXTRACT_COUNT`,
 
 | Component | How |
 |---|---|
-| API / Worker | Railway → Deployments → redeploy the previous build (instant) |
+| API | Railway → Deployments → redeploy the previous build (instant) |
 | Frontend | Cloudflare Pages → Deployments → rollback to prior deployment |
-| Video optimization | Set `VIDEO_OPTIMIZE_ENABLED=false` — the task and sweep both no-op immediately |
+| Job throughput | Raise `JOBS_MAX_CONCURRENT` / `JOBS_MAX_QUEUED`, or lower them if RAM is tight — config only, no deploy of code |
+| Back to the worker | Only possible while Redis still exists: redeploy the pre-merge API build and re-add the worker service from `railway.worker.json` at that commit (spec §6) |
 | Database | Migration `0013` is **additive and nullable**, so rolling back application code needs **no** DB downgrade |
 | Dependency upgrade | Redeploy the previous build as above, then `git revert` the `uv.lock` change so the next deploy doesn't bring it back (§16) |
-
-Note that video optimization is **not** reversible per-file: once a raw video is
-replaced by its compressed version, the original bytes are gone. That's the
-intended behavior (replay is preserved), but it's why §12 is gated behind a
-passing smoke test rather than enabled on first deploy.
 
 ## 15. Post-launch watch list
 
 - **Supabase storage usage** — the one cost line that grows monotonically. The
   1 GB free tier is the trigger for the $25 Pro plan.
-- **Aggregate optimization ratio** from worker logs — confirms the ~85–90%
-  reduction is actually landing.
-- **Worker job durations** — transcode + Gemini stacking toward
-  `WORKER_JOB_TIMEOUT_SEC` (240s) is the early warning to split or raise it.
-- **Supabase connection count** — should stay small with one replica in session
-  mode; a spike means the pool or replica count changed.
-- **Sentry error rate** after enabling optimization — ffmpeg failures are
-  swallowed by design, so they show as logs, not user-facing errors.
+- **`job.finished` logs** — one line per job with `outcome`, `wait_sec` and
+  `run_sec`. `outcome=rejected_busy` or `wait_timeout` (also a Sentry breadcrumb)
+  means the limits are too tight for the traffic; `run_sec` creeping toward
+  `JOB_TIMEOUT_SEC` is the early warning to raise it or split the work.
+- **Container RAM** — reviews now spike memory in the process that serves HTTP.
+  An OOM takes HTTP down with it; Railway restarts it and the startup sweep fails
+  the orphaned rows, but `JOBS_MAX_CONCURRENT` is the lever.
+- **Supabase connection count** — should stay at or under 5 with one replica in
+  session mode; a spike means the pool or replica count changed.
+  `EMAXCONNSESSION` in Sentry means the cap of 15 was hit (§5).
+- **Idle state** — the service should read **Sleeping** after ~10–15 min without
+  traffic. If it never sleeps, something is producing outbound traffic on a timer
+  (§17).
 
 ## 16. Dependencies — the lock file
 
@@ -329,3 +342,33 @@ Install uv locally with `brew install uv` (or see https://docs.astral.sh/uv/).
 - **uv itself is pinned** in two places: the Dockerfile
   (`COPY --from=ghcr.io/astral-sh/uv:<version>`) and `.github/workflows/ci.yml`
   (`setup-uv` → `version:`). Bump them together.
+
+## 17. Serverless, sleeping, and the drain window
+
+Railway bills RAM per minute of runtime, so an always-awake service costs money
+with zero users. A Serverless service sleeps after ~10 min **without outbound
+traffic**, and traffic to other services in the same project counts — which is
+why the old arq worker (polling Redis every ~0.5 s) kept itself, Redis, and the
+bill awake. Nothing in the API runs on a timer now: no cron, no queue polling.
+SQLAlchemy only pings on checkout (`pool_pre_ping`), idle asyncpg connections
+send nothing, and Sentry only sends events and request sessions.
+
+Two consequences to keep in mind:
+
+- **No sleeping mid-job.** A running job talks to Supabase and Gemini, which is
+  outbound traffic, so the container stays awake until it finishes — at most
+  `JOB_TIMEOUT_SEC` (240 s), well inside the idle window.
+- **Cold start.** The first request after sleeping waits for the container to
+  boot: Python imports plus the startup sweep (two indexed `UPDATE`s, capped at
+  10 s). Heavy imports (`cv2`, `google.genai`) are deliberately lazy; keep them
+  that way.
+
+**Drain window.** Railway sends SIGTERM, then SIGKILL after the deployment
+draining period. `JobRunner.close()` cancels queued jobs immediately and gives
+running ones `JOB_SHUTDOWN_GRACE_SEC` (25 s) before cancelling them; each then
+marks its own row `failed` with "Processing was interrupted." so the user sees a
+Retry button instead of a spinner. Set
+`RAILWAY_DEPLOYMENT_DRAINING_SECONDS ≥ JOB_SHUTDOWN_GRACE_SEC + 5`, or the drain
+is killed half-way and the next startup sweep has to clean up instead — still
+correct, just slower for the user. Check the variable's name and default in
+Railway's docs when setting it.

@@ -14,8 +14,8 @@ import inspect
 import pytest
 
 from app.core.frame_extractor import FrameExtractor
+from app.core.jobs import JobRunner
 from app.core.storage import StorageClient
-from app.core.video_transcoder import VideoTranscoder
 from app.repositories.ai import ReviewRepository, TrainingPlanRepository
 from app.repositories.auth import AuthRepository
 from app.repositories.media import MediaRepository
@@ -37,7 +37,6 @@ REPO_PAIRS = [
 # Collaborators outside the repository layer that are also faked.
 COLLABORATOR_PAIRS = [
     (fake_deps.FakeFrameExtractor, FrameExtractor),
-    (fake_deps.FakeVideoTranscoder, VideoTranscoder),
 ]
 
 ALL_PAIRS = REPO_PAIRS + COLLABORATOR_PAIRS
@@ -172,9 +171,13 @@ def test_fake_storage_signatures_match_the_real_client(name):
     assert real == fake
 
 
-def test_the_fake_arq_pool_matches_the_enqueue_call_shape():
-    """Routes call enqueue_job(name, *args); the fake must accept the same shape."""
-    params = _params(fake_deps.FakeArqPool, "enqueue_job")
-    assert params[0].name == "name"
-    assert any(p.kind is inspect.Parameter.VAR_POSITIONAL for p in params)
-    assert inspect.iscoroutinefunction(fake_deps.FakeArqPool.enqueue_job)
+def test_the_fake_job_runner_matches_the_submit_call_shape():
+    """Routes call submit(fn, job_id, on_failure=...); the fake must accept the same."""
+    real = _params(JobRunner, "submit")
+    fake = _params(fake_deps.FakeJobRunner, "submit")
+    assert [p.name for p in real] == [p.name for p in fake]
+    assert {p.name for p in real if p.kind is p.KEYWORD_ONLY} == {"on_failure"}
+    assert {p.name for p in fake if p.kind is p.KEYWORD_ONLY} == {"on_failure"}
+    # Sync on both sides: a coroutine fake would silently never run the job.
+    assert not inspect.iscoroutinefunction(JobRunner.submit)
+    assert not inspect.iscoroutinefunction(fake_deps.FakeJobRunner.submit)

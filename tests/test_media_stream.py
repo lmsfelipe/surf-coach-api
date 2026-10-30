@@ -12,8 +12,9 @@ from jose import jwt
 from app.api import media as media_api
 from app.api import sessions as sessions_api
 from app.core.config import get_settings
+from app.core.deps import db_session
 from app.core.security.media_token import mint_media_token
-from app.core.storage import get_storage_client
+from app.core.storage import StorageStream, get_storage_client
 from app.main import app
 from app.services.media import MediaService
 from app.services.sessions import SessionsService
@@ -48,10 +49,12 @@ def _override_media_deps():
 
     app.dependency_overrides[sessions_api.get_sessions_service] = _sessions_service
     app.dependency_overrides[media_api.get_media_service] = _media_service
+    app.dependency_overrides[media_api.get_media_stream_service] = _media_service
     app.dependency_overrides[get_storage_client] = lambda: storage
     yield
     app.dependency_overrides.pop(sessions_api.get_sessions_service, None)
     app.dependency_overrides.pop(media_api.get_media_service, None)
+    app.dependency_overrides.pop(media_api.get_media_stream_service, None)
     app.dependency_overrides.pop(get_storage_client, None)
 
 
@@ -155,6 +158,47 @@ async def test_streamed_bytes_match_the_stored_object(client):
     assert partial.content == original[10:510]
     assert partial.headers["content-length"] == "500"
     assert partial.headers["content-range"] == f"bytes 10-509/{len(original)}"
+
+
+async def test_stream_closes_its_db_session_before_sending_bytes(client, monkeypatch):
+    """A playing video must not pin a pooled DB connection for its whole duration.
+
+    Supabase's session-mode pooler caps the project at a handful of connections,
+    so a session held open until the last byte let a few open players starve
+    every other request (EMAXCONNSESSION).
+    """
+    pytest.importorskip("magic")
+    user_id = uuid4()
+    async with client as c:
+        session_id = await _create_session(c, user_id)
+        content_url = (await _upload_image(c, user_id, session_id))["contentUrl"]
+
+        events: list[str] = []
+
+        async def _tracked_session():
+            events.append("session opened")
+            yield None
+            events.append("session closed")
+
+        real_aiter_bytes = StorageStream.aiter_bytes
+
+        def _tracked_aiter_bytes(self):
+            events.append("bytes sent")
+            return real_aiter_bytes(self)
+
+        # Run the real stream dependency, and the scope it declares on db_session,
+        # around the fake-backed service the fixture builds.
+        fake_service = app.dependency_overrides.pop(media_api.get_media_stream_service)
+        monkeypatch.setattr(media_api, "get_media_service", lambda *_: fake_service())
+        monkeypatch.setattr(StorageStream, "aiter_bytes", _tracked_aiter_bytes)
+        app.dependency_overrides[db_session] = _tracked_session
+        try:
+            r = await c.get(content_url)
+        finally:
+            app.dependency_overrides.pop(db_session, None)
+
+    assert r.status_code == 200
+    assert events == ["session opened", "session closed", "bytes sent"]
 
 
 # ---- Auth / token error cases --------------------------------------------
