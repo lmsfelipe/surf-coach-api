@@ -18,7 +18,6 @@ os.environ.setdefault("TRAINING_WORKOUTS_PER_PLAN", "3")
 os.environ.setdefault("CONTENT_MODERATION_ENABLED", "false")
 os.environ.setdefault("RATE_LIMIT_ENABLED", "false")
 os.environ.setdefault("SENTRY_DSN", "")
-os.environ.setdefault("VIDEO_OPTIMIZE_ENABLED", "true")
 
 # Imported after the env defaults above: importing app.core.config constructs
 # Settings, which requires them to already be set.

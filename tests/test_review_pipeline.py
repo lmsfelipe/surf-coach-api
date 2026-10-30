@@ -20,7 +20,13 @@ from app.core.errors import (
     ReviewNotRetryableError,
 )
 from app.core.security.jwt import AuthUser
-from app.services.ai import ReviewOutput, ReviewService, ScoreRubric, normalise_scores
+from app.services.ai import (
+    STUCK_PROCESSING_MESSAGE,
+    ReviewOutput,
+    ReviewService,
+    ScoreRubric,
+    normalise_scores,
+)
 from tests.fake_deps import (
     FakeAuthRepo,
     FakeFrameExtractor,
@@ -481,7 +487,7 @@ async def test_a_naive_processing_timestamp_is_treated_as_utc(ctx):
     )
 
     assert out.status == "failed"
-    assert out.error_message == ReviewService.STUCK_PROCESSING_MESSAGE
+    assert out.error_message == STUCK_PROCESSING_MESSAGE
 
 
 async def test_review_for_session_rejects_another_users_session(ctx):

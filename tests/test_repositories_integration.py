@@ -399,8 +399,10 @@ async def test_a_video_row_keeps_its_duration_precision(db, profile_id):
     assert (await repo.get(media.id)).duration_seconds == Decimal("12.34")
 
 
-async def test_optimize_attempts_defaults_to_zero(db, profile_id):
-    """The poison-pill guard counts up from this server default."""
+async def test_the_unused_optimizer_columns_still_default_cleanly(db, profile_id):
+    """Nothing writes these since the server-side optimizer was removed; the
+    columns stay until a later migration drops them, so an insert must not need
+    them."""
     session = await _make_session(db, profile_id)
     media = await MediaRepository(db).create(**await _media_kwargs(session.id))
 
@@ -468,105 +470,6 @@ async def test_deleting_a_session_cascades_to_its_media(db, profile_id):
     await SessionsRepository(db).delete(session)
 
     assert await media_repo.get(media.id) is None
-
-
-async def test_mark_optimized_stamps_the_time_and_new_size(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-
-    await repo.mark_optimized(media.id, 512)
-
-    # mark_optimized issues raw SQL that bypasses the ORM, so the row is read
-    # back the same way rather than through the (now stale) identity map.
-    row = (
-        await db.execute(
-            text("SELECT optimized_at, file_size_bytes FROM public.media WHERE id = :id"),
-            {"id": str(media.id)},
-        )
-    ).one()
-    assert row.optimized_at is not None
-    assert row.file_size_bytes == 512
-
-
-async def test_increment_optimize_attempts_accumulates(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-
-    await repo.increment_optimize_attempts(media.id)
-    await repo.increment_optimize_attempts(media.id)
-
-    attempts = await db.scalar(
-        text("SELECT optimize_attempts FROM public.media WHERE id = :id"), {"id": str(media.id)}
-    )
-    assert attempts == 2
-
-
-async def test_the_optimize_sweep_respects_the_grace_period(db, profile_id):
-    """A just-uploaded video is still within its grace window, so it is not swept."""
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-    await _backdate(db, "media", media.id, 600)  # ten minutes old
-
-    within_grace = await repo.list_unoptimized_videos(older_than_sec=900, limit=10, max_attempts=3)
-    assert media.id not in {m.id for m in within_grace}
-
-    past_grace = await repo.list_unoptimized_videos(older_than_sec=300, limit=10, max_attempts=3)
-    assert media.id in {m.id for m in past_grace}
-
-
-async def test_the_optimize_sweep_skips_images(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    image = await repo.create(**await _media_kwargs(session.id, media_type="image"))
-    await _backdate(db, "media", image.id, 3600)
-
-    rows = await repo.list_unoptimized_videos(older_than_sec=0, limit=10, max_attempts=3)
-
-    assert image.id not in {m.id for m in rows}
-
-
-async def test_the_optimize_sweep_skips_already_optimized_videos(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-    await _backdate(db, "media", media.id, 3600)
-    await repo.mark_optimized(media.id, 100)
-
-    rows = await repo.list_unoptimized_videos(older_than_sec=0, limit=10, max_attempts=3)
-
-    assert media.id not in {m.id for m in rows}
-
-
-async def test_the_optimize_sweep_gives_up_after_max_attempts(db, profile_id):
-    """The poison-pill guard: a video that keeps failing must stop being re-enqueued."""
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    media = await repo.create(**await _media_kwargs(session.id, media_type="video"))
-    await _backdate(db, "media", media.id, 3600)
-
-    for _ in range(2):
-        await repo.increment_optimize_attempts(media.id)
-    still_eligible = await repo.list_unoptimized_videos(older_than_sec=0, limit=10, max_attempts=3)
-    assert media.id in {m.id for m in still_eligible}
-
-    await repo.increment_optimize_attempts(media.id)  # third strike
-    exhausted = await repo.list_unoptimized_videos(older_than_sec=0, limit=10, max_attempts=3)
-    assert media.id not in {m.id for m in exhausted}
-
-
-async def test_the_optimize_sweep_honours_its_batch_limit(db, profile_id):
-    session = await _make_session(db, profile_id)
-    repo = MediaRepository(db)
-    for i in range(5):
-        media = await repo.create(
-            **await _media_kwargs(session.id, media_type="video", file_name=f"{i}.mp4")
-        )
-        await _backdate(db, "media", media.id, 3600)
-
-    assert len(await repo.list_unoptimized_videos(older_than_sec=0, limit=2, max_attempts=3)) == 2
 
 
 # ---------------------------------------------------------------------------

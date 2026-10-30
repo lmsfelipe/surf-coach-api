@@ -9,9 +9,12 @@ from jose import jwt
 from app.api import reviews as reviews_api
 from app.api import sessions as sessions_api
 from app.core.config import get_settings
-from app.core.deps import get_arq_pool
+from app.core.deps import get_job_runner
+from app.core.jobs import JobRunnerClosedError
+from app.jobs import BUSY_MESSAGE, mark_review_failed
 from app.main import app
 from app.services.ai import (
+    STUCK_PROCESSING_MESSAGE,
     GeminiService,
     ReviewOutput,
     ReviewService,
@@ -20,10 +23,10 @@ from app.services.ai import (
 )
 from app.services.sessions import SessionsService
 from tests.fake_deps import (
-    FakeArqPool,
     FakeAuthRepo,
     FakeFrameExtractor,
     FakeGeminiService,
+    FakeJobRunner,
     FakeMediaRepo,
     FakeReviewRepo,
     FakeSessionsRepo,
@@ -44,7 +47,7 @@ def review_ctx():
         "storage": FakeStorageClient(),
         "frames": FakeFrameExtractor(frames=[b"frame-1", b"frame-2"]),
         "gemini": FakeGeminiService(make_review_output()),
-        "arq": FakeArqPool(),
+        "runner": FakeJobRunner(),
     }
     return ctx
 
@@ -71,11 +74,11 @@ def _override_review_deps(review_ctx):
     app.dependency_overrides[reviews_api.get_review_service] = lambda: _build_review_service(
         review_ctx
     )
-    app.dependency_overrides[get_arq_pool] = lambda: review_ctx["arq"]
+    app.dependency_overrides[get_job_runner] = lambda: review_ctx["runner"]
     yield
     app.dependency_overrides.pop(sessions_api.get_sessions_service, None)
     app.dependency_overrides.pop(reviews_api.get_review_service, None)
-    app.dependency_overrides.pop(get_arq_pool, None)
+    app.dependency_overrides.pop(get_job_runner, None)
 
 
 def _token(user_id: UUID, email: str = "surfer@example.com") -> str:
@@ -140,12 +143,12 @@ async def test_generate_review_accepts_and_enqueues(client, review_ctx):
     assert body["status"] == "processing"
     assert body["narrative"] is None
 
-    assert review_ctx["arq"].jobs == [("process_review_task", (body["id"],))]
+    assert review_ctx["runner"].jobs == [("process_review_task", (body["id"],))]
 
 
 async def test_generate_review_marks_failed_when_enqueue_fails(client, review_ctx):
-    """If Redis is unreachable the row must not be left stuck in 'processing'."""
-    review_ctx["arq"] = FakeArqPool(raise_exc=RuntimeError("redis down"))
+    """A submit the runner refuses must not leave the row stuck in 'processing'."""
+    review_ctx["runner"] = FakeJobRunner(raise_exc=JobRunnerClosedError("shutting down"))
     user_id = uuid4()
     headers = {"Authorization": f"Bearer {_token(user_id)}"}
     async with client as c:
@@ -162,10 +165,47 @@ async def test_generate_review_marks_failed_when_enqueue_fails(client, review_ct
     assert body["errorMessage"] == reviews_api.ENQUEUE_FAILED_MESSAGE
 
 
+async def test_generate_review_marks_failed_when_the_queue_is_full(client, review_ctx):
+    """A burst must say so now, not fail as "took too long" four minutes later."""
+    review_ctx["runner"] = FakeJobRunner(busy=True)
+    user_id = uuid4()
+    headers = {"Authorization": f"Bearer {_token(user_id)}"}
+    async with client as c:
+        session_id = await _create_session(c, user_id)
+        await _seed_media(review_ctx, UUID(session_id), user_id)
+        r = await c.post(
+            "/api/v1/reviews/",
+            headers=headers,
+            json={"sessionId": session_id},
+        )
+    assert r.status_code == 202
+    body = r.json()
+    assert body["status"] == "failed"
+    assert body["errorMessage"] == BUSY_MESSAGE
+    assert review_ctx["runner"].jobs == []
+
+
+async def test_generate_review_hands_the_runner_the_matching_failure_hook(client, review_ctx):
+    """The runner marks jobs that never start, so it needs the right helper."""
+    user_id = uuid4()
+    headers = {"Authorization": f"Bearer {_token(user_id)}"}
+    async with client as c:
+        session_id = await _create_session(c, user_id)
+        await _seed_media(review_ctx, UUID(session_id), user_id)
+        r = await c.post("/api/v1/reviews/", headers=headers, json={"sessionId": session_id})
+
+    (job_id, hook) = review_ctx["runner"].failure_hooks[0]
+    assert job_id == r.json()["id"]
+    assert hook is mark_review_failed
+
+
 async def test_stale_processing_review_fails_on_read(client, review_ctx):
-    """Worker offline: a 'processing' review older than the stuck threshold is
-    failed when read, so the client's polling loop terminates instead of spinning
-    forever (the worker's sweeper cannot help — it runs inside the dead worker)."""
+    """A 'processing' review older than the stuck threshold is failed when read.
+
+    Only a hard kill (OOM, SIGKILL) leaves a row like this — every other path
+    marks its own row — and the next startup sweep would fix it. This read-path
+    check is what stops the client polling in the meantime.
+    """
     user_id = uuid4()
     headers = {"Authorization": f"Bearer {_token(user_id)}"}
     async with client as c:
@@ -182,12 +222,12 @@ async def test_stale_processing_review_fails_on_read(client, review_ctx):
     assert r.status_code == 200
     body = r.json()
     assert body["status"] == "failed"
-    assert body["errorMessage"] == ReviewService.STUCK_PROCESSING_MESSAGE
+    assert body["errorMessage"] == STUCK_PROCESSING_MESSAGE
 
 
 async def test_fresh_processing_review_stays_processing_on_read(client, review_ctx):
-    """A recently-enqueued review is still within the threshold and must not be
-    failed prematurely — the worker may yet pick it up."""
+    """A just-submitted review is still within the threshold and must not be
+    failed prematurely — its job may yet be waiting for a slot."""
     user_id = uuid4()
     headers = {"Authorization": f"Bearer {_token(user_id)}"}
     async with client as c:
@@ -400,7 +440,7 @@ async def test_process_review_scores_are_isolated_from_description():
         "storage": FakeStorageClient(),
         "frames": FakeFrameExtractor(frames=[b"frame-1", b"frame-2"]),
         "gemini": FakeGeminiService(make_review_output()),
-        "arq": FakeArqPool(),
+        "runner": FakeJobRunner(),
     }
     session = await ctx["sessions"].create(
         profile_id=user_id,
@@ -439,7 +479,7 @@ async def test_process_review_without_description_skips_refinement():
         "storage": FakeStorageClient(),
         "frames": FakeFrameExtractor(frames=[b"frame-1", b"frame-2"]),
         "gemini": FakeGeminiService(make_review_output()),
-        "arq": FakeArqPool(),
+        "runner": FakeJobRunner(),
     }
     session = await ctx["sessions"].create(
         profile_id=user_id,

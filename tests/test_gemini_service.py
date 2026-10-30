@@ -6,10 +6,13 @@ Every test stubs the google-genai client, so nothing here touches the network.
 from __future__ import annotations
 
 import json
+import time
+from types import SimpleNamespace
 
 import pytest
 
 from app.core.errors import AIGenerationFailedError, AIParseFailedError
+from app.core.jobs import JOB_DEADLINE
 from app.services.ai import (
     GeminiService,
     ModerationOutput,
@@ -35,9 +38,13 @@ class _StubModels:
     def __init__(self, results: list) -> None:
         self._results = list(results)
         self.calls: list[dict] = []
+        # Optional hook: lets a test simulate an attempt that consumes budget.
+        self.on_call = None
 
     def generate_content(self, *, model, contents, config):
         self.calls.append({"model": model, "contents": contents, "config": config})
+        if self.on_call is not None:
+            self.on_call()
         result = self._results.pop(0) if self._results else self._results
         if isinstance(result, BaseException):
             raise result
@@ -152,7 +159,15 @@ def test_cause_chain_terminates_on_self_reference():
 # ---------------------------------------------------------------------------
 
 
-def _call(client, *, max_attempts=3, base_delay=0.01):
+def _call(
+    client,
+    *,
+    max_attempts=3,
+    base_delay=0.01,
+    request_timeout_sec=90.0,
+    min_attempt_sec=10.0,
+    deadline_margin_sec=5.0,
+):
     return _generate_content_with_retry(
         client,
         model="m",
@@ -160,6 +175,50 @@ def _call(client, *, max_attempts=3, base_delay=0.01):
         config=None,
         max_attempts=max_attempts,
         base_delay=base_delay,
+        request_timeout_sec=request_timeout_sec,
+        min_attempt_sec=min_attempt_sec,
+        deadline_margin_sec=deadline_margin_sec,
+    )
+
+
+def _timeout_ms(client, index: int = 0) -> int:
+    """The per-attempt HTTP timeout the retry loop handed to the client (ms)."""
+    return client.models.calls[index]["config"].http_options.timeout
+
+
+@pytest.fixture
+def job_deadline():
+    """Set JOB_DEADLINE as the job runner does, relative to now."""
+    tokens = []
+
+    def _set(seconds_from_now: float) -> None:
+        tokens.append(JOB_DEADLINE.set(time.monotonic() + seconds_from_now))
+
+    yield _set
+    for token in reversed(tokens):
+        JOB_DEADLINE.reset(token)
+
+
+@pytest.fixture
+def fake_clock(monkeypatch, _no_real_sleep):
+    """Controllable monotonic clock; a backoff sleep advances it instead of waiting.
+
+    Lets a test say "this attempt took 50 s" without taking 50 s, which is the
+    only way to exercise a deadline that is reached mid-retry.
+    """
+    now = [1_000.0]
+    slept: list[float] = []
+
+    monkeypatch.setattr("app.services.ai.time.monotonic", lambda: now[0])
+
+    def _sleep(seconds: float) -> None:
+        slept.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr("app.services.ai.time.sleep", _sleep)
+
+    return SimpleNamespace(
+        slept=slept, advance=lambda seconds: now.__setitem__(0, now[0] + seconds)
     )
 
 
@@ -211,6 +270,116 @@ def test_backoff_delay_grows_between_attempts(stub_gemini, _no_real_sleep):
     assert 1.0 <= _no_real_sleep[0] <= 1.25
     assert 2.0 <= _no_real_sleep[1] <= 2.5
     assert _no_real_sleep[1] > _no_real_sleep[0]
+
+
+# ---------------------------------------------------------------------------
+# Per-attempt timeout and the job deadline
+#
+# Gemini runs in a thread, and a thread cannot be cancelled. Without these the
+# API process would keep a hung call — and the frames it was sent — alive long
+# after the job that started it was marked failed.
+# ---------------------------------------------------------------------------
+
+
+def test_the_per_attempt_timeout_reaches_the_client_in_milliseconds(stub_gemini):
+    client = stub_gemini([_Response("ok")])
+    _call(client, request_timeout_sec=90.0)
+    assert _timeout_ms(client) == 90_000
+
+
+def test_without_a_deadline_only_the_fixed_timeout_applies(stub_gemini):
+    """Upload-time moderation runs on the HTTP path, outside any job."""
+    client = stub_gemini([_Response("ok")])
+    assert JOB_DEADLINE.get() is None
+    _call(client, request_timeout_sec=30.0)
+    assert _timeout_ms(client) == 30_000
+
+
+def test_the_attempt_timeout_is_clamped_to_the_remaining_budget(
+    stub_gemini, job_deadline, fake_clock
+):
+    client = stub_gemini([_Response("ok")])
+    job_deadline(40.0)
+
+    _call(client, request_timeout_sec=90.0, deadline_margin_sec=5.0)
+
+    # 40s left minus the 5s margin, so the attempt may not run the full 90s.
+    assert _timeout_ms(client) == 35_000
+
+
+def test_an_attempt_that_cannot_finish_is_not_started(stub_gemini, job_deadline):
+    client = stub_gemini([_Response("never reached")])
+    job_deadline(8.0)  # 3s after the margin — below min_attempt_sec
+
+    with pytest.raises(AIGenerationFailedError):
+        _call(client, min_attempt_sec=10.0, deadline_margin_sec=5.0)
+
+    assert client.models.calls == []
+
+
+def test_a_deadline_hit_after_a_transient_failure_re_raises_that_failure(
+    stub_gemini, job_deadline, fake_clock
+):
+    """The user should see why the call failed, not a generic message."""
+    overloaded = _CodedError(503)
+    client = stub_gemini([overloaded, _Response("never reached")])
+    job_deadline(60.0)
+    # The first attempt burns almost the whole budget before failing.
+    client.models.on_call = lambda: fake_clock.advance(50.0)
+
+    with pytest.raises(_CodedError) as exc:
+        _call(client, base_delay=0.1, min_attempt_sec=10.0, deadline_margin_sec=5.0)
+
+    assert exc.value is overloaded
+    assert len(client.models.calls) == 1
+
+
+def test_a_backoff_sleep_that_would_cross_the_deadline_is_skipped(
+    stub_gemini, job_deadline, fake_clock
+):
+    client = stub_gemini([_CodedError(503), _Response("never reached")])
+    job_deadline(30.0)
+
+    with pytest.raises(_CodedError):
+        _call(client, base_delay=60.0, min_attempt_sec=10.0, deadline_margin_sec=5.0)
+
+    assert fake_clock.slept == []  # never slept past the deadline
+    assert len(client.models.calls) == 1
+
+
+def test_a_backoff_that_fits_still_retries(stub_gemini, job_deadline, fake_clock):
+    client = stub_gemini([_CodedError(503), _Response("ok")])
+    job_deadline(120.0)
+
+    assert _call(client, base_delay=1.0).text == "ok"
+
+    assert len(fake_clock.slept) == 1
+    assert len(client.models.calls) == 2
+
+
+def test_a_real_config_keeps_its_fields_when_the_timeout_is_attached(stub_gemini):
+    from google.genai import types
+
+    client = stub_gemini([_Response("ok")])
+    config = types.GenerateContentConfig(response_mime_type="application/json", temperature=0.2)
+
+    _generate_content_with_retry(
+        client,
+        model="m",
+        contents=["p"],
+        config=config,
+        max_attempts=1,
+        base_delay=0.0,
+        request_timeout_sec=12.0,
+        min_attempt_sec=1.0,
+        deadline_margin_sec=0.0,
+    )
+
+    sent = client.models.calls[0]["config"]
+    assert sent.response_mime_type == "application/json"
+    assert sent.temperature == 0.2
+    assert sent.http_options.timeout == 12_000
+    assert config.http_options is None  # the caller's config is left alone
 
 
 # ---------------------------------------------------------------------------

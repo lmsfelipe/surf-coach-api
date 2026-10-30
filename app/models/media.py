@@ -38,6 +38,9 @@ class Media(Base):
     file_name: Mapped[str] = mapped_column(String, nullable=False)
     file_size_bytes: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     duration_seconds: Mapped[Decimal | None] = mapped_column(Numeric(6, 2), nullable=True)
+    # Unused since 2026-10-29: the server-side video optimizer was removed when the
+    # worker merged into the API (videos are compressed in the browser now). Columns
+    # kept so the removal needs no migration; drop them in a later one.
     optimized_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     optimize_attempts: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0"), default=0

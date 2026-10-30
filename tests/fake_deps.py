@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+from app.core.jobs import JobRunnerBusyError
 from app.models.exercise import Exercise
 from app.models.media import Media
 from app.models.profile import Profile
@@ -132,46 +133,6 @@ class FakeMediaRepo:
 
     async def delete(self, media: Media) -> None:
         self._store.pop(media.id, None)
-
-    async def mark_optimized(self, media_id: UUID, size_bytes: int) -> None:
-        media = self._store.get(media_id)
-        if media:
-            media.optimized_at = datetime.now(tz=UTC)
-            media.file_size_bytes = size_bytes
-
-    async def increment_optimize_attempts(self, media_id: UUID) -> None:
-        media = self._store.get(media_id)
-        if media:
-            media.optimize_attempts = (media.optimize_attempts or 0) + 1
-
-    async def list_unoptimized_videos(
-        self, older_than_sec: int, limit: int, max_attempts: int
-    ) -> list[Media]:
-        return [
-            m
-            for m in self._store.values()
-            if m.media_type == "video"
-            and m.optimized_at is None
-            and (m.optimize_attempts or 0) < max_attempts
-        ][:limit]
-
-
-class FakeVideoTranscoder:
-    def __init__(
-        self,
-        output: bytes = b"compressed-mp4-bytes",
-        *,
-        raise_exc: Exception | None = None,
-    ) -> None:
-        self._output = output
-        self._raise_exc = raise_exc
-        self.calls: list[int] = []
-
-    async def transcode(self, video_bytes: bytes) -> bytes:
-        self.calls.append(len(video_bytes))
-        if self._raise_exc:
-            raise self._raise_exc
-        return self._output
 
 
 class FakeReviewRepo:
@@ -309,18 +270,31 @@ class FakeSurfboardRepo:
         self._store.pop(board.id, None)
 
 
-class FakeArqPool:
-    """Stands in for the arq Redis pool — records enqueued jobs instead of sending them."""
+class FakeJobRunner:
+    """Stands in for the in-process JobRunner — records jobs instead of running them.
 
-    def __init__(self, *, raise_exc: Exception | None = None) -> None:
+    ``busy=True`` reproduces a full wait queue and ``raise_exc`` a closed runner,
+    the two ways ``submit`` refuses work in production.
+    """
+
+    def __init__(
+        self,
+        *,
+        busy: bool = False,
+        raise_exc: Exception | None = None,
+    ) -> None:
         self.jobs: list[tuple[str, tuple]] = []
+        self.failure_hooks: list[tuple[str, object]] = []
+        self._busy = busy
         self._raise_exc = raise_exc
 
-    async def enqueue_job(self, name: str, *args):
+    def submit(self, fn, job_id: str, *, on_failure) -> None:
+        if self._busy:
+            raise JobRunnerBusyError("queue full")
         if self._raise_exc:
             raise self._raise_exc
-        self.jobs.append((name, args))
-        return None
+        self.jobs.append((fn.__name__, (job_id,)))
+        self.failure_hooks.append((job_id, on_failure))
 
 
 class FakeStorageClient:
